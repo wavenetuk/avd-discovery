@@ -1,0 +1,47 @@
+{
+  "_comment": "Configuration for the PrimaryApplicationsOnly filter in discoverApps.ps1.",
+  "PrimaryApplicationFilters": {
+    "_comment_NamePatterns": "Regex patterns matched against application display names. Any match causes the application to be excluded. Patterns are case-insensitive by default via the (?i) prefix.",
+    "NamePatterns": [
+      "(?i)driver",
+      "(?i)firmware",
+      "(?i)hotfix",
+      "(?i)^microsoft (visual c\\+\\+|vc\\+\\+)",
+      "(?i)^microsoft windows desktop runtime",
+      "(?i)^microsoft asp\\.net core",
+      "(?i)^microsoft edge webview2 runtime",
+      "(?i)^microsoft update health tools",
+      "(?i)^microsoft onedrive$",
+      "(?i)^webview2 runtime",
+      "(?i)redistributable",
+      "(?i)runtime",
+      "(?i)service pack",
+      "(?i)update helper",
+      "(?i)component",
+      "(?i)support",
+      "(?i)plug-?in",
+      "(?i)plugin",
+      "(?i)helper",
+      "(?i)launcher",
+      "(?i)bonjour",
+      "(?i)^apple application support",
+      "(?i)^apple software update",
+      "(?i)^microsoft teams meeting add-in",
+      "(?i)^citrix .*redirect",
+      "(?i)^citrix .*webview",
+      "(?i)^citrix .*authentication manager",
+      "(?i)^citrix .*workspace browser",
+      "(?i)^update for",
+      "(?i)^security update for"
+    ],
+    "_comment_PublisherPatterns": "Regex patterns matched against the publisher field. Used together with SupportingPublisherNamePattern — an application is excluded only when its publisher matches one of these AND its name matches SupportingPublisherNamePattern.",
+    "PublisherPatterns": [
+      "(?i)^microsoft corporation$",
+      "(?i)^microsoft$",
+      "(?i)^citrix systems,? inc\\.?$",
+      "(?i)^apple inc\\.?$"
+    ],
+    "_comment_SupportingPublisherNamePattern": "Secondary name filter applied after a publisher match. Catches known supporting-component naming conventions from the publishers listed in PublisherPatterns.",
+    "SupportingPublisherNamePattern": "(?i)(support|component|redirect|plugin|plug-?in|runtime|helper|update|add-in|addin|launcher)"
+  }
+}
