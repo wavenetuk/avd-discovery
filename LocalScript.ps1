@@ -2243,8 +2243,7 @@ try {
 	$teamsMediaOptimizationDiscovery = Get-TeamsMediaOptimizationDiscovery
 	$rdpRedirectionDiscovery = Get-RdpRedirectionDiscovery
 	$rdpShortpathDiscovery   = Get-RdpShortpathDiscovery
-	# $adDependencyDiscovery   = Get-ActiveDirectoryDependencyDiscovery  # TEMP: disabled to isolate output size issue
-	$adDependencyDiscovery   = $null
+	$adDependencyDiscovery   = Get-ActiveDirectoryDependencyDiscovery
 	$resolvedOutputDirectory = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path $PSScriptRoot 'vm-discovery' } else { [System.IO.Path]::GetFullPath($OutputDirectory) }
 	$resolvedOutputPath = New-ExportFilePath -Directory $resolvedOutputDirectory -CustomerCode $customerCode -Hostname $machineDetails.Hostname
 	$outputDirectory = Split-Path -Path $resolvedOutputPath -Parent
