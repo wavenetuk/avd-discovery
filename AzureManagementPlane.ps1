@@ -2468,7 +2468,7 @@ function Invoke-HostPoolLocalDiscovery {
 		'    $b64     = [Convert]::ToBase64String($cms.ToArray())',
 		'    $stgPath = Join-Path ([System.IO.Path]::GetTempPath()) ("avd-stage-$id.b64")',
 		'    [System.IO.File]::WriteAllText($stgPath, $b64, [System.Text.Encoding]::ASCII)',
-		'    Write-Output "##AVD_FILE##$stgPath##SIZE##$($b64.Length)##"',
+		'    Write-Output "##AVD_FILE##$stgPath##SIZE##$($b64.Length)##JSON##$($jb.Length)##"',
 		'} catch {',
 		'    $errMsg = ($_.Exception.Message -replace "[\r\n]+", " ").Trim()',
 		'    Write-Output "##AVD_LOCAL_DISCOVERY_ERROR##$errMsg"',
@@ -2509,7 +2509,12 @@ function Invoke-HostPoolLocalDiscovery {
 	}
 	$stagingPath = $Matches[1].Trim()
 	$fileSize    = [int]$Matches[2]
-	Write-Host "    [LocalDiscovery] Staging file written: $stagingPath ($fileSize chars)"
+	$rawJsonSize = ''
+	if ($stdout -match '##JSON##(\d+)##') {
+		$rawJsonBytes = [int64]$Matches[1]
+		$rawJsonSize  = " (raw JSON: $([Math]::Round($rawJsonBytes / 1KB, 1)) KB)"
+	}
+	Write-Host "    [LocalDiscovery] Staging file written: $stagingPath ($fileSize chars)$rawJsonSize"
 
 	# Read the staging file back in chunks, then delete it regardless of success or failure.
 	$b64Payload = $null
