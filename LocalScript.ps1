@@ -324,7 +324,6 @@ function Get-DsRegStatus {
 	}
 
 	return [PSCustomObject]@{
-		RawValues          = [PSCustomObject]$values
 		AzureAdJoined      = ConvertTo-BooleanFromText -Value (Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'AzureAdJoined')
 		EnterpriseJoined   = ConvertTo-BooleanFromText -Value (Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'EnterpriseJoined')
 		DomainJoined       = ConvertTo-BooleanFromText -Value (Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'DomainJoined')
@@ -453,7 +452,6 @@ function Get-IntuneEnrollmentDiscovery {
 		MdmServiceUrl               = $mdmUrl
 		IntuneRecordCount           = @($intuneRecords).Count
 		IntuneEnrollmentRecords     = @($intuneRecords)
-		AllEnrollmentRecords        = @($enrollmentRecords)
 		ImeInstalled                = $null -ne $imeService
 		ImeServiceStatus            = if ($null -eq $imeService) { 'NotInstalled' } else { [string]$imeService.Status }
 		ImeVersion                  = $imeVersion
@@ -1199,10 +1197,6 @@ function Get-FSLogixDiscovery {
 		DeleteLocalProfileWhenVHDShouldApply = if ($null -eq $effectiveConfig) { $null } else { Get-OptionalPropertyValue -Object $effectiveConfig -PropertyName 'DeleteLocalProfileWhenVHDShouldApply' }
 		ConcurrentUserSessions      = if ($null -eq $effectiveConfig) { $null } else { Get-OptionalPropertyValue -Object $effectiveConfig -PropertyName 'ConcurrentUserSessions' }
 		AccessNetworkAsComputerObject = if ($null -eq $effectiveConfig) { $null } else { Get-OptionalPropertyValue -Object $effectiveConfig -PropertyName 'AccessNetworkAsComputerObject' }
-		RawLocalConfig              = $localConfig
-		RawPolicyConfig             = $policyConfig
-		OfficeContainerRawLocalConfig = $odfcLocalConfig
-		OfficeContainerRawPolicyConfig = $odfcPolicyConfig
 		OfficeCloudCacheLocations   = @($odfcCloudCacheLocations)
 		RedirectionsXml             = @(
 			(Get-FSLogixRedirectionsXmlDiscovery -ComponentName 'Profiles' -EffectiveConfig $effectiveConfig)
@@ -1337,12 +1331,16 @@ function Get-AvdConnectivityDiscovery {
 	}
 	Write-Host ''
 
+	# Only emit results that are notable: required failures and optional failures.
+	# All-passing required endpoints are omitted to keep the output compact.
+	$notableResults = @($results | Where-Object { -not $_.Connected })
+
 	[PSCustomObject]@{
 		AllRequiredReachable     = @($requiredFailed).Count -eq 0
 		RequiredEndpointCount    = @($requiredResults).Count
 		RequiredReachableCount   = @($requiredPassed).Count
 		RequiredUnreachableCount = @($requiredFailed).Count
-		Results                  = @($results)
+		FailedEndpoints          = @($notableResults)
 	}
 }
 
@@ -1561,56 +1559,55 @@ function Get-ActiveDirectoryDependencyDiscovery {
 	accounts, scheduled tasks running as domain accounts, ODBC data sources pointing at
 	domain servers or using domain credentials, and active TCP connections to common AD
 	ports (88, 135, 389, 445, 464, 636, 3268, 3269).
+
+	TCP connections are deduplicated by remote address + port so that hundreds of SMB
+	sessions to the same file server appear as a single entry with a connection count.
 	#>
 
 	# --- Domain-account services ---
 	$domainServices = @()
 	try {
-		$allServices = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)
-		$domainServices = @($allServices | Where-Object {
-			$acct = $_.StartName
-			$null -ne $acct -and
-			$acct -ne '' -and
-			$acct -notmatch '^(LocalSystem|NT AUTHORITY\\|NT SERVICE\\|LOCAL SERVICE|NETWORK SERVICE)' -and
-			$acct -match '\\'
-		} | ForEach-Object {
-			[PSCustomObject]@{
-				Name        = $_.Name
-				DisplayName = Get-NormalizedText -Value $_.DisplayName
-				Account     = $_.StartName
-				State       = $_.State
-				StartMode   = $_.StartMode
-			}
-		})
+		$domainServices = @(Get-CimInstance -ClassName Win32_Service `
+			-Property Name,DisplayName,StartName,State,StartMode `
+			-ErrorAction Stop |
+			Where-Object {
+				$acct = $_.StartName
+				-not [string]::IsNullOrEmpty($acct) -and
+				$acct -match '\\' -and
+				$acct -notmatch '^(LocalSystem$|NT AUTHORITY\\|NT SERVICE\\|LOCAL SERVICE$|NETWORK SERVICE$)'
+			} | ForEach-Object {
+				[PSCustomObject]@{
+					Name        = $_.Name
+					DisplayName = Get-NormalizedText -Value $_.DisplayName
+					Account     = $_.StartName
+					State       = [string]$_.State
+					StartMode   = [string]$_.StartMode
+				}
+			})
 	}
-	catch {
-	}
+	catch { }
 
 	# --- Domain-account scheduled tasks ---
 	$domainTasks = @()
 	try {
-		$allTasks = @(Get-ScheduledTask -ErrorAction Stop)
-		$domainTasks = @($allTasks | ForEach-Object {
-			$task = $_
-			@($task.Principal) | Where-Object {
-				$userId = $_.UserId
-				$null -ne $userId -and
-				$userId -ne '' -and
-				$userId -notmatch '^(SYSTEM|S-1-5-18|LOCAL SERVICE|NETWORK SERVICE|BUILTIN\\|NT AUTHORITY\\|NT SERVICE\\|Users|Administrators)' -and
-				$userId -match '\\'
-			} | ForEach-Object {
-				[PSCustomObject]@{
-					TaskPath  = $task.TaskPath
-					TaskName  = $task.TaskName
-					Account   = $_.UserId
-					RunLevel  = [string]$_.RunLevel
-					State     = [string]$task.State
-				}
+		$domainTasks = @(Get-ScheduledTask -ErrorAction Stop | ForEach-Object {
+			$principal = $_.Principal
+			if ($null -eq $principal) { return }
+			$userId = $null
+			try { $userId = [string]$principal.UserId } catch { return }
+			if ([string]::IsNullOrEmpty($userId)) { return }
+			if ($userId -notmatch '\\') { return }
+			if ($userId -match '^(SYSTEM$|S-1-5-18$|LOCAL SERVICE$|NETWORK SERVICE$|BUILTIN\\|NT AUTHORITY\\|NT SERVICE\\|S-1-5-)') { return }
+			[PSCustomObject]@{
+				TaskPath = [string]$_.TaskPath
+				TaskName = [string]$_.TaskName
+				Account  = $userId
+				RunLevel = try { [string]$principal.RunLevel } catch { $null }
+				State    = try { [string]$_.State } catch { $null }
 			}
 		})
 	}
-	catch {
-	}
+	catch { }
 
 	# --- ODBC data sources (system DSNs — 32-bit and 64-bit) ---
 	$odbcSources = @()
@@ -1619,8 +1616,7 @@ function Get-ActiveDirectoryDependencyDiscovery {
 			'HKLM:\SOFTWARE\ODBC\ODBC.INI',
 			'HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBC.INI'
 		)
-		$domainPattern = '\\\\[A-Za-z0-9_.-]+\.[A-Za-z]{2,}|\\\\[A-Za-z0-9_-]+'  # UNC server name
-		$domainCredPattern = '[A-Za-z0-9_-]+\\[A-Za-z0-9_.-]+'  # domain\user
+		$domainPattern = '\\\\[A-Za-z0-9_.-]+\.[A-Za-z]{2,}|\\\\[A-Za-z0-9_-]+'
 
 		foreach ($odbcRoot in $odbcPaths) {
 			if (-not (Test-Path $odbcRoot)) { continue }
@@ -1630,29 +1626,25 @@ function Get-ActiveDirectoryDependencyDiscovery {
 			foreach ($dsn in $dsnNames) {
 				$vals = Get-RegistryKeyValues -Path "$odbcRoot\$dsn"
 				if ($null -eq $vals) { continue }
-				$server  = $vals.Server
-				$uid     = $vals.UID
-				$dbq     = $vals.DBQ
-				$driver  = $vals.Driver
-				$allVals = ($vals.PSObject.Properties | ForEach-Object { $_.Value }) -join ' '
+				$server = $vals.Server
+				$uid    = $vals.UID
+				$dbq    = $vals.DBQ
+				$driver = $vals.Driver
 
-				# Flag if the server field looks domain-joined (UNC path or FQDN) or
-				# if a UID value contains a domain\user pattern.
 				$serverFlag = (-not [string]::IsNullOrWhiteSpace($server) -and (
-					$server -match '\.' -or   # FQDN
-					$server -match '^\\\\'))   # UNC
-				$credFlag = (-not [string]::IsNullOrWhiteSpace($uid) -and $uid -match '\\')
-				$dbqFlag  = (-not [string]::IsNullOrWhiteSpace($dbq) -and $dbq -match $domainPattern)
+					$server -match '\.' -or $server -match '^\\\\'))
+				$credFlag   = (-not [string]::IsNullOrWhiteSpace($uid) -and $uid -match '\\')
+				$dbqFlag    = (-not [string]::IsNullOrWhiteSpace($dbq) -and $dbq -match $domainPattern)
 
 				if ($serverFlag -or $credFlag -or $dbqFlag) {
 					$odbcSources += [PSCustomObject]@{
-						DsnName       = $dsn
-						RegistryPath  = "$odbcRoot\$dsn"
-						Driver        = Get-NormalizedText -Value $driver
-						Server        = Get-NormalizedText -Value $server
-						Uid           = Get-NormalizedText -Value $uid
-						Dbq           = Get-NormalizedText -Value $dbq
-						FlagReasons   = @(
+						DsnName      = $dsn
+						RegistryPath = "$odbcRoot\$dsn"
+						Driver       = Get-NormalizedText -Value $driver
+						Server       = Get-NormalizedText -Value $server
+						Uid          = Get-NormalizedText -Value $uid
+						Dbq          = Get-NormalizedText -Value $dbq
+						FlagReasons  = @(
 							if ($serverFlag) { 'DomainServer' }
 							if ($credFlag)   { 'DomainCredential' }
 							if ($dbqFlag)    { 'DomainPath' }
@@ -1662,13 +1654,16 @@ function Get-ActiveDirectoryDependencyDiscovery {
 			}
 		}
 	}
-	catch {
-	}
+	catch { }
 
 	# --- Active TCP connections to common AD ports ---
 	# 88=Kerberos, 135=RPC/EPM, 389=LDAP, 445=SMB, 464=Kpasswd,
 	# 636=LDAPS, 3268=GC-LDAP, 3269=GC-LDAPS
-	$adPorts   = @(88, 135, 389, 445, 464, 636, 3268, 3269)
+	#
+	# Connections are grouped by {RemoteAddress, RemotePort} — an AVD host can have
+	# thousands of active SMB sessions to the same file server, so emitting each
+	# individual connection would produce a huge payload.
+	$adPorts = @(88, 135, 389, 445, 464, 636, 3268, 3269)
 	$adPortMap = @{
 		88   = 'Kerberos'
 		135  = 'RPC/Endpoint Mapper'
@@ -1681,52 +1676,45 @@ function Get-ActiveDirectoryDependencyDiscovery {
 	}
 	$adConnections = @()
 	try {
-		$localIPs = @([System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
-			Where-Object { $_.AddressFamily -in @('InterNetwork', 'InterNetworkV6') } |
-			ForEach-Object { $_.ToString() })
-		$localIPs += '127.0.0.1'
-		$localIPs += '::1'
+		$localIPs = @('127.0.0.1', '::1')
+		try {
+			$localIPs += @([System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
+				ForEach-Object { $_.ToString() })
+		}
+		catch { }
 
-		$adConnections = @(Get-NetTCPConnection -State Established -ErrorAction Stop |
-			Where-Object {
-				$_.RemotePort -in $adPorts -and
-				$_.RemoteAddress -notin $localIPs
-			} | ForEach-Object {
-				$conn = $_
-				$remoteName = $null
-				try {
-					$remoteName = [System.Net.Dns]::GetHostEntry($conn.RemoteAddress).HostName
-				}
-				catch { }
+		$adConnections = @(
+			Get-NetTCPConnection -State Established -ErrorAction Stop |
+			Where-Object { $_.RemotePort -in $adPorts -and $_.RemoteAddress -notin $localIPs } |
+			Group-Object -Property RemoteAddress, RemotePort |
+			ForEach-Object {
+				$sample = $_.Group[0]
 				[PSCustomObject]@{
-					LocalAddress  = $conn.LocalAddress
-					LocalPort     = $conn.LocalPort
-					RemoteAddress = $conn.RemoteAddress
-					RemotePort    = $conn.RemotePort
-					Service       = $adPortMap[$conn.RemotePort]
-					RemoteName    = $remoteName
-					OwningProcess = $conn.OwningProcess
+					RemoteAddress   = $sample.RemoteAddress
+					RemotePort      = $sample.RemotePort
+					Service         = $adPortMap[$sample.RemotePort]
+					ConnectionCount = $_.Count
 				}
-			})
+			}
+		)
 	}
-	catch {
-	}
+	catch { }
 
 	$hasDependencies = @($domainServices).Count -gt 0 -or
-		               @($domainTasks).Count -gt 0 -or
-		               @($odbcSources).Count -gt 0 -or
-		               @($adConnections).Count -gt 0
+	                   @($domainTasks).Count -gt 0 -or
+	                   @($odbcSources).Count -gt 0 -or
+	                   @($adConnections).Count -gt 0
 
 	[PSCustomObject]@{
-		HasDomainDependencies         = $hasDependencies
-		DomainServiceCount            = @($domainServices).Count
-		DomainServices                = @($domainServices)
-		DomainScheduledTaskCount      = @($domainTasks).Count
-		DomainScheduledTasks          = @($domainTasks)
-		DomainOdbcSourceCount         = @($odbcSources).Count
-		DomainOdbcSources             = @($odbcSources)
-		AdPortConnectionCount         = @($adConnections).Count
-		AdPortConnections             = @($adConnections)
+		HasDomainDependencies    = $hasDependencies
+		DomainServiceCount       = @($domainServices).Count
+		DomainServices           = @($domainServices)
+		DomainScheduledTaskCount = @($domainTasks).Count
+		DomainScheduledTasks     = @($domainTasks)
+		DomainOdbcSourceCount    = @($odbcSources).Count
+		DomainOdbcSources        = @($odbcSources)
+		AdPortConnectionCount    = @($adConnections).Count
+		AdPortConnections        = @($adConnections)
 	}
 }
 
@@ -2031,27 +2019,23 @@ function Get-RdpShortpathDiscovery {
 	# --- Recent usage — RdpCoreTS operational event log ---
 	# Event 131: "Shortpath transport established for RDP connection"
 	# Event 70:  "A connection was established using UDP transport" (older builds)
-	$recentShortpathEvents   = @()
 	$shortpathUsedRecently   = $false
 	$shortpathEventQueryDays = 7
+	$shortpathEventCount131  = 0
+	$shortpathEventCount70   = 0
+	$shortpathLastEventTime  = $null
 
 	try {
 		$cutoff = (Get-Date).AddDays(-$shortpathEventQueryDays)
 		$logName = 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational'
-		$events = Get-WinEvent -LogName $logName -ErrorAction SilentlyContinue |
-			Where-Object { $_.Id -in @(131, 70) -and $_.TimeCreated -ge $cutoff }
+		$events = @(Get-WinEvent -LogName $logName -ErrorAction SilentlyContinue |
+			Where-Object { $_.Id -in @(131, 70) -and $_.TimeCreated -ge $cutoff })
 
-		if ($events) {
-			$recentShortpathEvents = @($events | ForEach-Object {
-				[PSCustomObject]@{
-					EventId     = $_.Id
-					TimeCreated = $_.TimeCreated.ToString('s')
-					Message     = Get-NormalizedText -Value ($_.Message -split "`n")[0]
-				}
-			} | Select-Object -First 20)
-			$shortpathUsedRecently = $true
-		}
-	}
+		if (@($events).Count -gt 0) {
+			$shortpathUsedRecently  = $true
+			$shortpathEventCount131 = @($events | Where-Object { $_.Id -eq 131 }).Count
+			$shortpathEventCount70  = @($events | Where-Object { $_.Id -eq 70 }).Count
+			$shortpathLastEventTime = ($events | Sort-Object TimeCreated -Descending | Select-Object -First 1).TimeCreated.ToString('s')
 	catch { }
 
 	# --- AVD host agent — carries the STUN/TURN client needed for public Shortpath ---
@@ -2085,7 +2069,9 @@ function Get-RdpShortpathDiscovery {
 		}
 		ShortpathUsedRecently        = $shortpathUsedRecently
 		ShortpathRecentEventLookback = "${shortpathEventQueryDays}d"
-		RecentShortpathEvents        = $recentShortpathEvents
+		ShortpathEvent131Count       = $shortpathEventCount131
+		ShortpathEvent70Count        = $shortpathEventCount70
+		ShortpathLastEventTime       = $shortpathLastEventTime
 		AvdAgentService              = if ($null -eq $agentService) { $null } else { [string]$agentService.Status }
 		AvdAgentVersion              = $agentVersion
 	}
@@ -2210,9 +2196,6 @@ function Get-RdpRedirectionDiscovery {
 		MaxIdleTime                 = Format-Milliseconds -V $maxIdleTime
 		MaxDisconnectionTime        = Format-Milliseconds -V $maxDisconTime
 		MaxConnectionTime           = Format-Milliseconds -V $maxConnTime
-		# Raw source values for reference
-		GroupPolicyValues           = $gpVals
-		LocalWinStationValues       = $winStaVals
 	}
 }
 
