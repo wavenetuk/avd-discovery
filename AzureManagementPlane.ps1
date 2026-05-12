@@ -2469,6 +2469,18 @@ function Invoke-HostPoolLocalDiscovery {
 		'    $stgPath = Join-Path ([System.IO.Path]::GetTempPath()) ("avd-stage-$id.b64")',
 		'    [System.IO.File]::WriteAllText($stgPath, $b64, [System.Text.Encoding]::ASCII)',
 		'    Write-Output "##AVD_FILE##$stgPath##SIZE##$($b64.Length)##JSON##$($jb.Length)##"',
+		'    $hf = Get-ChildItem -Path $outDir -Filter "*.gpresult.html" -File | Select-Object -First 1',
+		'    if ($hf) {',
+		'        $hb  = [System.IO.File]::ReadAllBytes($hf.FullName)',
+		'        $hms = [System.IO.MemoryStream]::new()',
+		'        $hgz = [System.IO.Compression.GZipStream]::new($hms, [System.IO.Compression.CompressionMode]::Compress)',
+		'        $hgz.Write($hb, 0, $hb.Length)',
+		'        $hgz.Close()',
+		'        $hb64     = [Convert]::ToBase64String($hms.ToArray())',
+		'        $hstgPath = Join-Path ([System.IO.Path]::GetTempPath()) ("avd-stage-$id-gp.b64")',
+		'        [System.IO.File]::WriteAllText($hstgPath, $hb64, [System.Text.Encoding]::ASCII)',
+		'        Write-Output "##AVD_GPRESULT##$hstgPath##SIZE##$($hb64.Length)##HTML##$($hb.Length)##"',
+		'    }',
 		'} catch {',
 		'    $errMsg = ($_.Exception.Message -replace "[\r\n]+", " ").Trim()',
 		'    Write-Output "##AVD_LOCAL_DISCOVERY_ERROR##$errMsg"',
@@ -2554,6 +2566,39 @@ function Invoke-HostPoolLocalDiscovery {
 	$outputFile = Join-Path $VmDiscoveryDirectory "$CustomerCode-$($vmName.ToLowerInvariant())-avd-discovery-$timestamp.json"
 	[System.IO.File]::WriteAllText($outputFile, $jsonContent, [System.Text.Encoding]::UTF8)
 	Write-Host "    [LocalDiscovery] Saved: $outputFile"
+
+	# Retrieve and save the gpresult HTML report if the VM staged one.
+	if ($stdout -match '##AVD_GPRESULT##(.+?)##SIZE##(\d+)##') {
+		$gpStgPath  = $Matches[1].Trim()
+		$gpFileSize = [int]$Matches[2]
+		$gpHtmlSize = ''
+		if ($stdout -match '##HTML##(\d+)##') { $gpHtmlSize = " (HTML: $([Math]::Round([int64]$Matches[1] / 1KB, 1)) KB)" }
+		Write-Host "    [LocalDiscovery] Retrieving gpresult HTML ($gpFileSize chars)$gpHtmlSize..."
+		$gpB64 = $null
+		try {
+			$gpB64 = Read-VmFileInChunks -VmResourceId $targetVmId -FilePath $gpStgPath -FileLength $gpFileSize
+		}
+		finally {
+			$gpCleanup = @("if (Test-Path '$gpStgPath') { Remove-Item -Path '$gpStgPath' -Force -ErrorAction SilentlyContinue }")
+			Invoke-VmRunCommand -VmResourceId $targetVmId -Script $gpCleanup -TimeoutSeconds 60 -InitialPollSeconds 3 | Out-Null
+		}
+		if (-not [string]::IsNullOrEmpty($gpB64)) {
+			try {
+				$gpCompressed = [Convert]::FromBase64String($gpB64)
+				$gpInMs  = [System.IO.MemoryStream]::new($gpCompressed)
+				$gpOutMs = [System.IO.MemoryStream]::new()
+				$gpGz    = [System.IO.Compression.GZipStream]::new($gpInMs, [System.IO.Compression.CompressionMode]::Decompress)
+				$gpGz.CopyTo($gpOutMs)
+				$gpGz.Close()
+				$gpHtmlPath = [System.IO.Path]::ChangeExtension($outputFile, '.gpresult.html')
+				[System.IO.File]::WriteAllBytes($gpHtmlPath, $gpOutMs.ToArray())
+				Write-Host "    [LocalDiscovery] Saved gpresult: $gpHtmlPath"
+			}
+			catch {
+				Write-Warning "    [LocalDiscovery] Failed to decode gpresult HTML from '$vmName': $($_.Exception.Message)"
+			}
+		}
+	}
 }
 
 # ------------------------------------------------------------------
