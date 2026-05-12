@@ -1553,6 +1553,183 @@ function Get-UniversalPrintDiscovery {
 	}
 }
 
+function Get-ActiveDirectoryDependencyDiscovery {
+	<#
+	.SYNOPSIS
+	Checks whether the host has dependencies on Active Directory that would block or
+	complicate a move to Entra-only (Azure AD) join. Examines services running as domain
+	accounts, scheduled tasks running as domain accounts, ODBC data sources pointing at
+	domain servers or using domain credentials, and active TCP connections to common AD
+	ports (88, 135, 389, 445, 464, 636, 3268, 3269).
+	#>
+
+	# --- Domain-account services ---
+	$domainServices = @()
+	try {
+		$allServices = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)
+		$domainServices = @($allServices | Where-Object {
+			$acct = $_.StartName
+			$null -ne $acct -and
+			$acct -ne '' -and
+			$acct -notmatch '^(LocalSystem|NT AUTHORITY\\|NT SERVICE\\|LOCAL SERVICE|NETWORK SERVICE)' -and
+			$acct -match '\\'
+		} | ForEach-Object {
+			[PSCustomObject]@{
+				Name        = $_.Name
+				DisplayName = Get-NormalizedText -Value $_.DisplayName
+				Account     = $_.StartName
+				State       = $_.State
+				StartMode   = $_.StartMode
+			}
+		})
+	}
+	catch {
+	}
+
+	# --- Domain-account scheduled tasks ---
+	$domainTasks = @()
+	try {
+		$allTasks = @(Get-ScheduledTask -ErrorAction Stop)
+		$domainTasks = @($allTasks | ForEach-Object {
+			$task = $_
+			@($task.Principal) | Where-Object {
+				$userId = $_.UserId
+				$null -ne $userId -and
+				$userId -ne '' -and
+				$userId -notmatch '^(SYSTEM|S-1-5-18|LOCAL SERVICE|NETWORK SERVICE|BUILTIN\\|NT AUTHORITY\\|NT SERVICE\\|Users|Administrators)' -and
+				$userId -match '\\'
+			} | ForEach-Object {
+				[PSCustomObject]@{
+					TaskPath  = $task.TaskPath
+					TaskName  = $task.TaskName
+					Account   = $_.UserId
+					RunLevel  = [string]$_.RunLevel
+					State     = [string]$task.State
+				}
+			}
+		})
+	}
+	catch {
+	}
+
+	# --- ODBC data sources (system DSNs — 32-bit and 64-bit) ---
+	$odbcSources = @()
+	try {
+		$odbcPaths = @(
+			'HKLM:\SOFTWARE\ODBC\ODBC.INI',
+			'HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBC.INI'
+		)
+		$domainPattern = '\\\\[A-Za-z0-9_.-]+\.[A-Za-z]{2,}|\\\\[A-Za-z0-9_-]+'  # UNC server name
+		$domainCredPattern = '[A-Za-z0-9_-]+\\[A-Za-z0-9_.-]+'  # domain\user
+
+		foreach ($odbcRoot in $odbcPaths) {
+			if (-not (Test-Path $odbcRoot)) { continue }
+			$dsnNames = @(Get-ChildItem -Path $odbcRoot -ErrorAction SilentlyContinue |
+				Where-Object { $_.PSChildName -ne 'ODBC Data Sources' } |
+				Select-Object -ExpandProperty PSChildName)
+			foreach ($dsn in $dsnNames) {
+				$vals = Get-RegistryKeyValues -Path "$odbcRoot\$dsn"
+				if ($null -eq $vals) { continue }
+				$server  = $vals.Server
+				$uid     = $vals.UID
+				$dbq     = $vals.DBQ
+				$driver  = $vals.Driver
+				$allVals = ($vals.PSObject.Properties | ForEach-Object { $_.Value }) -join ' '
+
+				# Flag if the server field looks domain-joined (UNC path or FQDN) or
+				# if a UID value contains a domain\user pattern.
+				$serverFlag = (-not [string]::IsNullOrWhiteSpace($server) -and (
+					$server -match '\.' -or   # FQDN
+					$server -match '^\\\\'))   # UNC
+				$credFlag = (-not [string]::IsNullOrWhiteSpace($uid) -and $uid -match '\\')
+				$dbqFlag  = (-not [string]::IsNullOrWhiteSpace($dbq) -and $dbq -match $domainPattern)
+
+				if ($serverFlag -or $credFlag -or $dbqFlag) {
+					$odbcSources += [PSCustomObject]@{
+						DsnName       = $dsn
+						RegistryPath  = "$odbcRoot\$dsn"
+						Driver        = Get-NormalizedText -Value $driver
+						Server        = Get-NormalizedText -Value $server
+						Uid           = Get-NormalizedText -Value $uid
+						Dbq           = Get-NormalizedText -Value $dbq
+						FlagReasons   = @(
+							if ($serverFlag) { 'DomainServer' }
+							if ($credFlag)   { 'DomainCredential' }
+							if ($dbqFlag)    { 'DomainPath' }
+						)
+					}
+				}
+			}
+		}
+	}
+	catch {
+	}
+
+	# --- Active TCP connections to common AD ports ---
+	# 88=Kerberos, 135=RPC/EPM, 389=LDAP, 445=SMB, 464=Kpasswd,
+	# 636=LDAPS, 3268=GC-LDAP, 3269=GC-LDAPS
+	$adPorts   = @(88, 135, 389, 445, 464, 636, 3268, 3269)
+	$adPortMap = @{
+		88   = 'Kerberos'
+		135  = 'RPC/Endpoint Mapper'
+		389  = 'LDAP'
+		445  = 'SMB'
+		464  = 'Kerberos Password Change'
+		636  = 'LDAPS'
+		3268 = 'Global Catalog LDAP'
+		3269 = 'Global Catalog LDAPS'
+	}
+	$adConnections = @()
+	try {
+		$localIPs = @([System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
+			Where-Object { $_.AddressFamily -in @('InterNetwork', 'InterNetworkV6') } |
+			ForEach-Object { $_.ToString() })
+		$localIPs += '127.0.0.1'
+		$localIPs += '::1'
+
+		$adConnections = @(Get-NetTCPConnection -State Established -ErrorAction Stop |
+			Where-Object {
+				$_.RemotePort -in $adPorts -and
+				$_.RemoteAddress -notin $localIPs
+			} | ForEach-Object {
+				$conn = $_
+				$remoteName = $null
+				try {
+					$remoteName = [System.Net.Dns]::GetHostEntry($conn.RemoteAddress).HostName
+				}
+				catch { }
+				[PSCustomObject]@{
+					LocalAddress  = $conn.LocalAddress
+					LocalPort     = $conn.LocalPort
+					RemoteAddress = $conn.RemoteAddress
+					RemotePort    = $conn.RemotePort
+					Service       = $adPortMap[$conn.RemotePort]
+					RemoteName    = $remoteName
+					OwningProcess = $conn.OwningProcess
+				}
+			})
+	}
+	catch {
+	}
+
+	$hasDependencies = @($domainServices).Count -gt 0 -or
+		               @($domainTasks).Count -gt 0 -or
+		               @($odbcSources).Count -gt 0 -or
+		               @($adConnections).Count -gt 0
+
+	[PSCustomObject]@{
+		HasDomainDependencies         = $hasDependencies
+		DomainServiceCount            = @($domainServices).Count
+		DomainServices                = @($domainServices)
+		DomainScheduledTaskCount      = @($domainTasks).Count
+		DomainScheduledTasks          = @($domainTasks)
+		DomainOdbcSourceCount         = @($odbcSources).Count
+		DomainOdbcSources             = @($odbcSources)
+		AdPortConnectionCount         = @($adConnections).Count
+		AdPortConnections             = @($adConnections)
+	}
+}
+
 function Get-GroupPolicyDiscovery {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -2109,6 +2286,7 @@ try {
 	$teamsMediaOptimizationDiscovery = Get-TeamsMediaOptimizationDiscovery
 	$rdpRedirectionDiscovery = Get-RdpRedirectionDiscovery
 	$rdpShortpathDiscovery   = Get-RdpShortpathDiscovery
+	$adDependencyDiscovery   = Get-ActiveDirectoryDependencyDiscovery
 	$resolvedOutputDirectory = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path $PSScriptRoot 'vm-discovery' } else { [System.IO.Path]::GetFullPath($OutputDirectory) }
 	$resolvedOutputPath = New-ExportFilePath -Directory $resolvedOutputDirectory -CustomerCode $customerCode -Hostname $machineDetails.Hostname
 	$outputDirectory = Split-Path -Path $resolvedOutputPath -Parent
@@ -2144,6 +2322,7 @@ try {
 		TeamsMediaOptimization = $teamsMediaOptimizationDiscovery
 		RdpRedirection       = $rdpRedirectionDiscovery
 		RdpShortpath         = $rdpShortpathDiscovery
+		ActiveDirectoryDependencies = $adDependencyDiscovery
 		AvdConnectivity      = $avdConnectivityDiscovery
 		GroupPolicy          = $groupPolicyDiscovery
 		Applications         = $installedApps

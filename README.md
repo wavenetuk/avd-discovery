@@ -275,6 +275,13 @@ For each of the following, reports the effective value, its source (Group Policy
 #### Group Policy Report
 - Runs `gpresult /h` and saves an HTML report alongside the JSON output (unless `-NoGpresult` is specified)
 
+#### Active Directory Dependency Assessment
+- Services running as domain accounts (excludes LocalSystem, NT AUTHORITY\\*, NT SERVICE\\*)
+- Scheduled tasks with a domain account principal
+- ODBC system DSNs (32-bit and 64-bit) where the server field is a FQDN/UNC path, or the UID contains a `domain\\user` credential
+- Active established TCP connections to AD ports: 88 (Kerberos), 135 (RPC), 389 (LDAP), 445 (SMB), 464 (Kpasswd), 636 (LDAPS), 3268/3269 (Global Catalog) — with reverse DNS lookup of the remote address
+- `HasDomainDependencies` summary flag set if any of the above are found
+
 ### Parameters
 
 | Parameter | Type | Default | Description |
@@ -551,3 +558,11 @@ For `DiagnosticsStatus: OK` and populated usage metrics, each host pool's Diagno
 |---|---|
 | `gpresult /h` HTML export | 🔴 |
 | `-NoGpresult` skip flag | 🟢 |
+
+#### Active Directory Dependency Assessment
+| Feature | Status |
+|---|---|
+| Services running as domain accounts | 🔴 |
+| Scheduled tasks running as domain accounts | 🔴 |
+| ODBC system DSNs with domain server or domain credentials | 🔴 |
+| Active TCP connections to AD ports (88/135/389/445/464/636/3268/3269) | 🔴 |
