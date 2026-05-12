@@ -202,11 +202,19 @@ Each object in `HostPools` contains:
 When `-RunLocalDiscovery` is passed, `AzureManagementPlane.ps1` finds the first powered-on session host in each pool and sends a small bootstrap script to it via the **Azure VM Run Command** API. The bootstrap runs entirely on the VM and:
 
 1. Downloads `LocalScript.ps1` and `appExclusions.config.json` from the GitHub repository (`raw.githubusercontent.com/wavenetuk/avd-discovery/<branch>`) using `Invoke-WebRequest`
-2. Executes `LocalScript.ps1` in a temporary directory with `-NoGpresult` (Group Policy export is unavailable in Run Command context)
+2. Executes `LocalScript.ps1` in a temporary directory
 3. GZip-compresses and base64-encodes the resulting JSON and writes it between sentinel markers in stdout
 4. `AzureManagementPlane.ps1` reads the stdout, decodes the payload, and saves the JSON to the `vm-discovery/` folder
 
 The files are always fetched fresh from GitHub, so the VM always runs the latest committed version of the script. Use `-GitHubBranch` to target a different branch during testing.
+
+**System account mode:** Azure VM Run Command executes as `NT AUTHORITY\SYSTEM` (or the machine account `HOSTNAME$`). `LocalScript.ps1` automatically detects this context and adjusts its behaviour:
+- `gpresult` is run with `/scope computer` only (user RSoP is unavailable under a machine account)
+- Per-user shell folder and mapped drive checks are skipped
+- Per-user Outlook cached mode registry settings are skipped
+- The output includes `"CollectionMode": "SystemAccount"` and `"RunningAsAccount"` so consumers can distinguish system-mode runs from interactive ones
+
+When run interactively on a host as a real user account, all of the above checks are performed in full and `"CollectionMode"` is `"Interactive"`.
 
 **Requirements:**
 - The session host must have outbound HTTPS access to `raw.githubusercontent.com`
@@ -235,7 +243,7 @@ Runs directly on an AVD session host (or via `-RunLocalDiscovery` in `AzureManag
 
 #### OneDrive Known Folder Move
 - Whether KFM policies are configured (`KFMSilentOptIn`, `KFMBlockOptOut`, tenant ID)
-- Actual per-user redirected folders (Desktop, Documents, Pictures)
+- Actual per-user redirected folders (Desktop, Documents, Pictures) — skipped when running as a system/machine account
 
 #### Antivirus
 - Registered antivirus product names from WMI/CIM (`Win32_Process`-based detection for Defender)
@@ -274,6 +282,7 @@ For each of the following, reports the effective value, its source (Group Policy
 
 #### Group Policy Report
 - Runs `gpresult /h` and saves an HTML report alongside the JSON output (unless `-NoGpresult` is specified)
+- When running as a system/machine account (e.g. via Azure VM Run Command), the report is automatically scoped to computer policy only (`/scope computer`); user RSoP requires an interactive run
 
 #### Active Directory Dependency Assessment
 - Services running as domain accounts (excludes LocalSystem, NT AUTHORITY\\*, NT SERVICE\\*)
@@ -320,8 +329,9 @@ Top-level structure:
 ```json
 {
   "CustomerAbbreviation": "contoso",
-  "Hostname": "avd-host-01",
   "CollectedAt": "2026-05-11T10:00:00",
+  "CollectionMode": "SystemAccount",
+  "RunningAsAccount": "WORKGROUP\\avd-host-01$",
   "InstalledApps": [ ... ],
   "MachineDetails": { ... },
   "FsLogix": { ... },

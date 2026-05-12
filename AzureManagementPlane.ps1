@@ -2457,7 +2457,7 @@ function Invoke-HostPoolLocalDiscovery {
 		'    New-Item -ItemType Directory -Path $outDir -Force | Out-Null',
 		'    Invoke-WebRequest -Uri $scriptUrl -OutFile $scrPath -UseBasicParsing',
 		'    Invoke-WebRequest -Uri $configUrl -OutFile $cfgPath -UseBasicParsing',
-		'    & $scrPath -CustomerAbbreviation $cCode -OutputDirectory $outDir -NoGpresult -PrimaryApplicationsOnly -ErrorAction Stop *>&1 | Out-Null',
+		'    & $scrPath -CustomerAbbreviation $cCode -OutputDirectory $outDir -PrimaryApplicationsOnly -ErrorAction Stop *>&1 | Out-Null',
 		'    $jf = Get-ChildItem -Path $outDir -Filter "*.json" -File | Select-Object -First 1',
 		'    if (-not $jf) { throw "No JSON output produced by LocalScript.ps1" }',
 		'    $jb  = [System.IO.File]::ReadAllBytes($jf.FullName)',
