@@ -76,6 +76,9 @@ Enumerates all AVD host pools across one or more Azure subscriptions and collect
 | `-UtcOffsetHours` | int | `0` | UTC offset for peak hours window (e.g. `1` for BST) |
 | `-OutputDirectory` | string | script folder | Directory for the JSON export |
 | `-RunLocalDiscovery` | switch | off | Execute `LocalScript.ps1` on a running VM in each pool via Azure VM Run Command (downloads from GitHub) |
+| `-InlineLocalScript` | switch | off | Embed `LocalScript.ps1` and `appExclusions.config.json` directly into the Run Command payload instead of downloading from GitHub on the VM. Use when VMs lack outbound HTTPS to `raw.githubusercontent.com` (AV/firewall restrictions). Requires the files to be present alongside `AzureManagementPlane.ps1` |
+| `-LocalDiscoveryTimeout` | int | `300` | Maximum seconds to wait for the on-VM script to complete when using `-RunLocalDiscovery`. Valid range: 60–3600 |
+| `-RunAsUser` | switch | off | Prompt for domain credentials before running local discovery and execute the Run Command as that user instead of SYSTEM. Shows a security warning before prompting. Useful when per-user checks (shell folders, mapped drives, Outlook settings) are needed |
 | `-GitHubBranch` | string | `main` | GitHub branch to download `LocalScript.ps1` and `appExclusions.config.json` from when using `-RunLocalDiscovery` |
 | `-SkipLicenceCheck` | switch | off | Skip Microsoft Graph licence collection |
 
@@ -86,7 +89,8 @@ Enumerates all AVD host pools across one or more Azure subscriptions and collect
 - Authenticated via `Connect-AzAccount`
 - **For usage metrics**: Diagnostic Settings on each host pool forwarding `Connection`, `Error`, `Checkpoint`, and `HostRegistration` log categories to a Log Analytics workspace
 - **For licence data**: the authenticated account requires Microsoft Graph `User.Read.All` and `Group.Read.All` (or equivalent)
-- **For `-RunLocalDiscovery`**: session host VMs must have outbound HTTPS access to `raw.githubusercontent.com` so they can download the scripts at runtime
+- **For `-RunLocalDiscovery`**: session host VMs must have outbound HTTPS access to `raw.githubusercontent.com` so they can download the scripts at runtime (or use `-InlineLocalScript` to bypass this requirement)
+- **For `-RunAsUser`**: a domain account with the right to log on to the session host interactively; credentials are collected once before discovery begins and are never written to disk
 
 ### Usage Examples
 
@@ -109,6 +113,16 @@ Enumerates all AVD host pools across one or more Azure subscriptions and collect
 # Run LocalScript.ps1 from a specific branch (e.g. for testing)
 .\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -GitHubBranch feature/my-branch
 
+# Run LocalScript.ps1 with inline mode (no outbound GitHub access needed on VMs)
+.\AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -InlineLocalScript -NoGpresult
+# Extend the per-VM timeout to 10 minutes (default is 300s)
+.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -LocalDiscoveryTimeout 600
+
+# Run as a domain user to enable per-user checks (shell folders, mapped drives, Outlook)
+.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -RunAsUser
+
+# Inline mode + run-as (blocked GitHub AND need per-user data)
+.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -InlineLocalScript -RunAsUser
 # Custom output directory
 .\AzureManagementPlane.ps1 -CustomerAbbreviation contoso -OutputDirectory C:\exports
 ```
@@ -196,19 +210,95 @@ Each object in `HostPools` contains:
 - **Context autosave disabled** — `Disable-AzContextAutosave` is called at startup (process-scoped) so subscription context switches are not persisted to disk.
 - **Original context restored** — the caller's Az context is captured before execution and restored in a `finally` block regardless of success or failure.
 - **No ARM write operations** — all ARM calls are GET or POST (query-only). The only file written is the local JSON export.
+- **Stale Run Command cleanup requires confirmation** — when `-RunLocalDiscovery` finds existing `runCommands` resources on a VM from a previous run, it lists them and prompts before issuing any DELETE. Declining skips the deletion (the VM may get stuck at Pending, but no write is performed without consent).
 
 ## How `-RunLocalDiscovery` Works
 
-When `-RunLocalDiscovery` is passed, `AzureManagementPlane.ps1` finds the first powered-on session host in each pool and sends a small bootstrap script to it via the **Azure VM Run Command** API. The bootstrap runs entirely on the VM and:
+When `-RunLocalDiscovery` is passed, `AzureManagementPlane.ps1` enumerates all powered-on session hosts in each pool, then attempts to run a bootstrap script on them in sequence via the **Azure VM Run Command v2** API until one succeeds. The bootstrap runs entirely on the VM and:
 
-1. Downloads `LocalScript.ps1` and `appExclusions.config.json` from the GitHub repository (`raw.githubusercontent.com/wavenetuk/avd-discovery/<branch>`) using `Invoke-WebRequest`
+1. Downloads `LocalScript.ps1` and `appExclusions.config.json` from the GitHub repository (`raw.githubusercontent.com/wavenetuk/avd-discovery/<branch>`) using `Invoke-WebRequest` — or decodes them from the embedded payload in inline mode
 2. Executes `LocalScript.ps1` in a temporary directory
-3. GZip-compresses and base64-encodes the resulting JSON and writes it between sentinel markers in stdout
-4. `AzureManagementPlane.ps1` reads the stdout, decodes the payload, and saves the JSON to the `vm-discovery/` folder
+3. GZip-compresses and base64-encodes the resulting JSON, writing it to a staging file on the VM
+4. Returns the staging file path via stdout; `AzureManagementPlane.ps1` reads it back in chunks, decodes the payload, and saves the JSON to the `vm-discovery/` folder
 
 The files are always fetched fresh from GitHub, so the VM always runs the latest committed version of the script. Use `-GitHubBranch` to target a different branch during testing.
 
-**System account mode:** Azure VM Run Command executes as `NT AUTHORITY\SYSTEM` (or the machine account `HOSTNAME$`). `LocalScript.ps1` automatically detects this context and adjusts its behaviour:
+### VM Selection and Rotation
+
+All powered-on session hosts in the pool are collected upfront. Discovery is attempted on the first one; if it fails or its agent appears unresponsive, the script automatically moves to the next powered-on host and tries again. This continues until one VM succeeds or all candidates are exhausted.
+
+If all VMs fail, a warning is printed listing how many hosts were tried.
+
+### Pre-flight Cleanup of Stale Run Command Resources
+
+The Azure VM agent can only process one `runCommands` resource at a time. A resource left in `Creating` or `Deleting` state from a previous timed-out run will block every subsequent attempt indefinitely.
+
+Before submitting a new Run Command, the script lists any existing `runCommands` resources on the target VM. If any are found, it:
+
+1. Prints a warning listing each resource name and its provisioning state
+2. Prompts for explicit confirmation before issuing any DELETE
+3. If confirmed, deletes them and polls until they are gone (up to 120 seconds)
+4. If declined, proceeds anyway — the VM may then get stuck at `Pending`, triggering the stuck-detection logic
+
+This is the only write operation in the script and requires user consent each time.
+
+### Stuck-at-Pending Detection
+
+Every third polling cycle, the script queries the Run Command **instance view** directly and logs the current `executionState` (e.g. `Running`, `Pending`). If the state remains `Pending` with `provisioningState: Creating` for 90 or more seconds, the script concludes that the VM agent is not processing commands and aborts the attempt early — rather than waiting the full timeout.
+
+On the first stuck VM in a pool, a yellow advisory box is printed explaining likely causes (endpoint security blocking execution, the Azure wireserver being unreachable, or a stuck agent goal-state queue) and recommending that the user cancel and run `LocalScript.ps1` directly on the host via RDP, Azure Bastion, an RMM tool, or LogicMonitor.
+
+### Timeout Diagnostics
+
+If a Run Command reaches the polling deadline without completing, the script fetches a final instance view snapshot before cleanup and logs:
+
+- `executionState` and `exitCode` from the VM agent
+- `provisioningState` of the Run Command resource
+- A snippet of `stdout` and `stderr` if any output was captured
+
+This information pinpoints whether the command was never delivered (stuck at `Pending/Creating`) or started but ran over time.
+
+### Controlling the Execution Timeout (`-LocalDiscoveryTimeout`)
+
+By default `AzureManagementPlane.ps1` waits up to **300 seconds** for the on-VM script to finish. If your session hosts are slow to start, heavily loaded, or the discovery scope is large, you can raise this:
+
+```powershell
+.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -LocalDiscoveryTimeout 600
+```
+
+Valid range is 60–3600 seconds. The value is passed directly to the Azure Run Command `timeoutInSeconds` field as well as the local polling deadline, so both the VM-side execution limit and the client-side wait are extended together.
+
+During polling, every third check also queries the Run Command **instance view** and logs the current execution state (e.g. `Running`, `Failed`) so you can confirm progress rather than watching silent poll lines.
+
+### Run-As Mode (`-RunAsUser`)
+
+Azure VM Run Command normally executes as `NT AUTHORITY\SYSTEM`. This means per-user registry hives, shell folder redirections, mapped drives, and Outlook cached-mode settings are not visible to `LocalScript.ps1` — the output will be marked `"CollectionMode": "SystemAccount"` and those checks are skipped.
+
+Add `-RunAsUser` to run as a real domain account instead:
+
+```powershell
+.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -RunAsUser
+```
+
+Before discovery begins you will see a prominent warning and be prompted for a username and password. Credentials are held in memory only for the duration of the run and are never written to disk. The script runs once per host pool, targeting a single powered-on session host, so you only need to enter credentials once per execution.
+
+> **Security note:** The account used needs the right to log on to the session host interactively. A read-only service account with interactive logon rights is preferred over a full admin account.
+
+### Inline Mode (`-InlineLocalScript`)
+
+If VMs cannot reach `raw.githubusercontent.com` (blocked by antivirus, firewall, proxy, or network policy), add `-InlineLocalScript` to embed the script files directly in the Run Command payload:
+
+```powershell
+.\AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -InlineLocalScript
+```
+
+In this mode, `LocalScript.ps1` and `appExclusions.config.json` are read from the local repository directory (alongside `AzureManagementPlane.ps1`), base64-encoded, and carried inside the wrapper script sent to the VM. On the VM, the embedded content is decoded to temp files before execution — no outbound internet access is required.
+
+The combined payload (~98 KB) fits well within the Azure Run Command v2 limit of 256 KB.
+
+> **Note:** Inline mode uses whatever version of the files is on your local disk. If you need the latest from GitHub, `git pull` first or omit `-InlineLocalScript` to use the default download behaviour.
+
+**Requirements:**
 - `gpresult` is run with `/scope computer` only (user RSoP is unavailable under a machine account)
 - Per-user shell folder and mapped drive checks are skipped
 - Per-user Outlook cached mode registry settings are skipped
@@ -217,8 +307,10 @@ The files are always fetched fresh from GitHub, so the VM always runs the latest
 When run interactively on a host as a real user account, all of the above checks are performed in full and `"CollectionMode"` is `"Interactive"`.
 
 **Requirements:**
-- The session host must have outbound HTTPS access to `raw.githubusercontent.com`
+- The session host must have outbound HTTPS access to `raw.githubusercontent.com` (unless `-InlineLocalScript` is used)
 - The calling account needs `Virtual Machine Contributor` or `Virtual Machine Run Command Contributor` on the session host VMs
+
+**System account mode:** Azure VM Run Command executes as `NT AUTHORITY\SYSTEM` (or the machine account `HOSTNAME$`). `LocalScript.ps1` automatically detects this context and adjusts its behaviour:
 
 ---
 

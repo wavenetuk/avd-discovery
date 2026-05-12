@@ -132,6 +132,41 @@ so that the gpresult HTML report is not generated on the session host. Useful wh
 Group Policy data is not required or when gpresult is known to fail in the target
 environment.
 
+.PARAMETER InlineLocalScript
+When specified alongside -RunLocalDiscovery, embeds LocalScript.ps1 and
+appExclusions.config.json directly into the Run Command payload instead of
+downloading them from GitHub on the VM. This avoids the requirement for VMs
+to have outbound HTTPS access to raw.githubusercontent.com, which may be
+blocked by antivirus software, firewalls, or proxy configurations.
+The files are read from the local repository directory (alongside this script)
+and base64-encoded into the wrapper script. The combined payload (~98 KB) fits
+within the Azure Run Command v2 limit of 256 KB.
+
+.PARAMETER LocalDiscoveryTimeout
+Maximum seconds to wait for the Run Command script to complete on each session
+host VM when using -RunLocalDiscovery. Defaults to 300 (5 minutes). Increase
+this value if your VMs are slow to execute the script (e.g. many installed
+applications or slow storage). Reduce it if you want faster failure detection
+when the VM agent is unresponsive. Valid range: 60–3600.
+During execution, the ARM instanceView is also checked every 3 polls for early
+failure states (Failed, TimedOut, Canceled) to abort without waiting for the
+full timeout when the VM agent reports back promptly.
+
+.PARAMETER RunAsUser
+When specified alongside -RunLocalDiscovery, prompts for a username and password
+that are passed to the Azure VM Run Command API as 'runAsUser' and 'runAsPassword'.
+The script then executes as that user instead of NT AUTHORITY\SYSTEM, which gives
+access to per-user registry hives (HKCU), user-scoped Group Policy, OneDrive KFM
+status, per-user application installs, and mapped drives.
+
+*** SECURITY WARNING ***
+The entered password is transmitted in plaintext in the ARM API request body over
+HTTPS and is briefly stored in the Azure runCommands child resource until it is
+deleted. The script always deletes the resource in a finally block, but the
+credentials are transiently visible in ARM activity logs and to anyone with
+read access to the runCommands resource. Do not use privileged or shared service
+account credentials. Prefer a standard non-admin domain user account.
+
 .PARAMETER GitHubBranch
 The branch name used when downloading LocalScript.ps1 and appExclusions.config.json
 from the GitHub repository (https://github.com/wavenetuk/avd-discovery) during
@@ -152,6 +187,12 @@ testing changes that have not yet been merged.
 
 .EXAMPLE
 .\AzureManagementPlane.ps1 -CustomerAbbreviation kcr -SubscriptionId '00000000-0000-0000-0000-000000000000' -OutputDirectory .\exports
+
+.EXAMPLE
+.\AzureManagementPlane.ps1 -CustomerAbbreviation kcr -RunLocalDiscovery -InlineLocalScript -NoGpresult
+Runs local discovery with the script files embedded directly in the Run Command payload,
+bypassing the need for VMs to reach raw.githubusercontent.com. Useful when AV or
+firewalls block outbound HTTPS from session hosts.
 #>
 
 param(
@@ -191,7 +232,17 @@ param(
 	[switch]$SkipLicenceCheck,
 
 	[Parameter(Mandatory = $false)]
-	[switch]$NoGpresult
+	[switch]$NoGpresult,
+
+	[Parameter(Mandatory = $false)]
+	[switch]$InlineLocalScript,
+
+	[Parameter(Mandatory = $false)]
+	[switch]$RunAsUser,
+
+	[Parameter(Mandatory = $false)]
+	[ValidateRange(60, 3600)]
+	[int]$LocalDiscoveryTimeout = 300
 )
 
 Set-StrictMode -Version Latest
@@ -200,6 +251,44 @@ $ErrorActionPreference = 'Stop'
 # ------------------------------------------------------------------
 # Helper functions
 # ------------------------------------------------------------------
+
+function Get-RunAsCredential {
+	<#
+	.SYNOPSIS
+	Displays a prominent security warning and prompts for a username and password
+	to use with the Azure VM Run Command runAsUser/runAsPassword feature.
+	#>
+	Write-Host ''
+	Write-Host '  ╔══════════════════════════════════════════════════════════════════════╗' -ForegroundColor Yellow
+	Write-Host '  ║                      *** SECURITY WARNING ***                       ║' -ForegroundColor Yellow
+	Write-Host '  ║                                                                      ║' -ForegroundColor Yellow
+	Write-Host '  ║  The password you enter will be transmitted IN PLAINTEXT in the      ║' -ForegroundColor Yellow
+	Write-Host '  ║  Azure ARM API request body and briefly stored in the runCommands    ║' -ForegroundColor Yellow
+	Write-Host '  ║  resource until it is deleted. It may appear in ARM activity logs.   ║' -ForegroundColor Yellow
+	Write-Host '  ║                                                                      ║' -ForegroundColor Yellow
+	Write-Host '  ║  Use a standard non-admin domain user account only.                 ║' -ForegroundColor Yellow
+	Write-Host '  ║  Do NOT use privileged, admin, or shared service accounts.          ║' -ForegroundColor Yellow
+	Write-Host '  ╚══════════════════════════════════════════════════════════════════════╝' -ForegroundColor Yellow
+	Write-Host ''
+
+	$username = $null
+	while ([string]::IsNullOrWhiteSpace($username)) {
+		$username = (Read-Host '  Run-as username (e.g. DOMAIN\user or user@domain.com)').Trim()
+	}
+
+	$securePassword = $null
+	while ($null -eq $securePassword -or $securePassword.Length -eq 0) {
+		$securePassword = Read-Host '  Run-as password' -AsSecureString
+	}
+
+	Write-Host ''
+
+	$bstr     = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+	$plainPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+	[System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+
+	return [PSCustomObject]@{ Username = $username; Password = $plainPwd }
+}
 
 function Get-CustomerAbbreviation {
 	param(
@@ -2175,17 +2264,75 @@ function Invoke-VmRunCommand {
 		# Sets the first poll interval. Use a lower value (e.g. 3) for short-running
 		# scripts such as chunk reads, where the VM finishes in a few seconds.
 		[Parameter(Mandatory = $false)]
-		[int]$InitialPollSeconds = 10
+		[int]$InitialPollSeconds = 10,
+
+		[Parameter(Mandatory = $false)]
+		[AllowNull()]
+		[PSCustomObject]$RunAsCredential
 	)
+
+	$vmLabel = ($VmResourceId -split '/')[-1]
 
 	# Retrieve the VM's Azure region — required as the 'location' field in the PUT body.
 	$vmResp = Invoke-AzRestMethod -Path "${VmResourceId}?api-version=2024-03-01" -Method GET -ErrorAction SilentlyContinue
 	if (-not $vmResp -or $vmResp.StatusCode -ne 200) {
 		$sc = if ($vmResp) { $vmResp.StatusCode } else { 'n/a' }
-		Write-Host "    [LocalDiscovery] Could not retrieve VM metadata (HTTP $sc)."
+		Write-Host "    [LocalDiscovery | $vmLabel] Could not retrieve VM metadata (HTTP $sc)."
 		return $null
 	}
 	$vmLocation = ($vmResp.Content | ConvertFrom-Json).location
+
+	# --- Pre-flight cleanup: remove any stale runCommand resources ---
+	# The VM agent can only process one runCommand at a time, so any leftover resource
+	# in Creating/Running/Deleting state will block the new one at Pending indefinitely.
+	# This catches resources from timed-out runs, manual tests, or other tooling.
+	# Deletion is a write operation so the user is warned and must confirm before proceeding.
+	$listPath = "${VmResourceId}/runCommands?api-version=2024-03-01"
+	$listRsp  = Invoke-AzRestMethod -Path $listPath -Method GET -ErrorAction SilentlyContinue
+	if ($listRsp -and $listRsp.StatusCode -eq 200) {
+		$listBody = $listRsp.Content | ConvertFrom-Json
+		$existing = @()
+		if ($listBody.PSObject.Properties['value']) { $existing = @($listBody.value) }
+		if ($existing.Count -gt 0) {
+			Write-Host ''
+			Write-Host "    [LocalDiscovery | $vmLabel] WARNING: Found $($existing.Count) existing Run Command resource(s) on this VM:" -ForegroundColor Yellow
+			foreach ($res in $existing) {
+				$resState = if ($res.properties -and $res.properties.PSObject.Properties['provisioningState']) { $res.properties.provisioningState } else { 'unknown' }
+				Write-Host "    [LocalDiscovery | $vmLabel]   $($res.name)  (state: $resState)" -ForegroundColor Yellow
+			}
+			Write-Host ''
+			Write-Host "    [LocalDiscovery | $vmLabel] These will block the new Run Command from executing." -ForegroundColor Yellow
+			Write-Host "    [LocalDiscovery | $vmLabel] Deletion is a write operation — all other operations are read-only." -ForegroundColor Yellow
+			Write-Host ''
+			$confirm = Read-Host "    Delete these resource(s) and continue? [y/N]"
+			if ($confirm -notmatch '^[Yy]$') {
+				Write-Host "    [LocalDiscovery | $vmLabel] Skipping deletion — Run Command may remain stuck at Pending on this VM." -ForegroundColor Yellow
+			} else {
+				foreach ($res in $existing) {
+					$resState = if ($res.properties -and $res.properties.PSObject.Properties['provisioningState']) { $res.properties.provisioningState } else { 'unknown' }
+					$delPath = "${VmResourceId}/runCommands/$($res.name)?api-version=2024-03-01"
+					Write-Host "    [LocalDiscovery | $vmLabel]   Deleting '$($res.name)' (state: $resState)..."
+					Invoke-AzRestMethod -Path $delPath -Method DELETE -ErrorAction SilentlyContinue | Out-Null
+				}
+				# Wait for deletions to complete — poll until no resources remain (max 120s)
+				$cleanupDeadline = (Get-Date).AddSeconds(120)
+				while ((Get-Date) -lt $cleanupDeadline) {
+					Start-Sleep -Seconds 5
+					$checkRsp = Invoke-AzRestMethod -Path $listPath -Method GET -ErrorAction SilentlyContinue
+					if ($checkRsp -and $checkRsp.StatusCode -eq 200) {
+						$checkBody = $checkRsp.Content | ConvertFrom-Json
+						$remaining = @()
+						if ($checkBody.PSObject.Properties['value']) { $remaining = @($checkBody.value) }
+						if ($remaining.Count -eq 0) {
+							Write-Host "    [LocalDiscovery | $vmLabel]   Stale resources cleaned up."
+							break
+						}
+					}
+				}
+			}
+			Write-Host ''
+		}
+	}
 
 	# Build a unique runCommands child-resource path.
 	$cmdName     = "avd-disc-$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
@@ -2196,22 +2343,30 @@ function Invoke-VmRunCommand {
 	# asyncExecution = $false ensures the ARM async operation does not report 'Succeeded'
 	# until the script on the VM has finished. This lets a single polling loop cover both
 	# resource provisioning and script execution.
+	$bodyProps = [ordered]@{
+		source           = @{ script = $scriptText }
+		asyncExecution   = $false
+		timeoutInSeconds = $TimeoutSeconds
+	}
+	if ($Parameters.Count -gt 0) {
+		$bodyProps['parameters'] = @($Parameters | ForEach-Object { @{ name = $_.name; value = $_.value } })
+	}
+	if ($null -ne $RunAsCredential) {
+		$bodyProps['runAsUser']     = $RunAsCredential.Username
+		$bodyProps['runAsPassword'] = $RunAsCredential.Password
+	}
 	$body = @{
 		location   = $vmLocation
-		properties = @{
-			source           = @{ script = $scriptText }
-			asyncExecution   = $false
-			timeoutInSeconds = $TimeoutSeconds
-		}
-	} | ConvertTo-Json -Depth 5
+		properties = $bodyProps
+	} | ConvertTo-Json -Depth 6
 
 	try {
-		Write-Host "    [LocalDiscovery] Submitting Run Command v2 to '$cmdName'..."
+		Write-Host "    [LocalDiscovery | $vmLabel] Submitting Run Command v2 to '$cmdName'..."
 		$putRsp = Invoke-AzRestMethod -Path $cmdPath -Method PUT -Payload $body -ErrorAction Stop
-		Write-Host "    [LocalDiscovery] PUT returned HTTP $($putRsp.StatusCode)."
+		Write-Host "    [LocalDiscovery | $vmLabel] PUT returned HTTP $($putRsp.StatusCode)."
 
 		if ($putRsp.StatusCode -notin @(200, 201, 202)) {
-			Write-Host "    [LocalDiscovery] Run Command v2 PUT returned HTTP $($putRsp.StatusCode) — expected 200, 201, or 202."
+			Write-Host "    [LocalDiscovery | $vmLabel] Run Command v2 PUT returned HTTP $($putRsp.StatusCode) — expected 200, 201, or 202."
 			return $null
 		}
 
@@ -2228,7 +2383,7 @@ function Invoke-VmRunCommand {
 		}
 
 		if ([string]::IsNullOrEmpty($pollFullUri)) {
-			Write-Host "    [LocalDiscovery] No Azure-AsyncOperation or Location header in Run Command v2 PUT response."
+			Write-Host "    [LocalDiscovery | $vmLabel] No Azure-AsyncOperation or Location header in Run Command v2 PUT response."
 			return $null
 		}
 
@@ -2236,7 +2391,7 @@ function Invoke-VmRunCommand {
 		$deadline  = (Get-Date).AddSeconds($TimeoutSeconds)
 		$pollSleep = $InitialPollSeconds
 		$pollCount = 0
-		Write-Host "    [LocalDiscovery] Waiting for script execution on VM (timeout ${TimeoutSeconds}s)..."
+		Write-Host "    [LocalDiscovery | $vmLabel] Waiting for script execution (timeout ${TimeoutSeconds}s)..."
 
 		while ((Get-Date) -lt $deadline) {
 			Start-Sleep -Seconds $pollSleep
@@ -2244,7 +2399,42 @@ function Invoke-VmRunCommand {
 			if ($pollSleep -lt 30) { $pollSleep = [Math]::Min(30, $pollSleep + 5) }
 
 			$elapsed = [int]((Get-Date) - $deadline.AddSeconds(-$TimeoutSeconds)).TotalSeconds
-			Write-Host "    [LocalDiscovery] Polling attempt #$pollCount (${elapsed}s elapsed)..."
+			Write-Host "    [LocalDiscovery | $vmLabel] Polling attempt #$pollCount (${elapsed}s elapsed)..."
+
+			# Every 3rd poll, check the instanceView directly for early failure states.
+			# This detects Failed/TimedOut/Canceled from the VM agent without waiting for
+			# the full timeout — useful when the script errors quickly but the ARM
+			# async-operation URL stays at InProgress briefly after VM-side completion.
+			# Also reports Running state so the user can see the script is progressing.
+			if ($pollCount % 3 -eq 0) {
+				$ivRsp = Invoke-AzRestMethod -Path $cmdPathView -Method GET -ErrorAction SilentlyContinue
+				if ($ivRsp -and $ivRsp.StatusCode -eq 200) {
+					$ivBody  = $ivRsp.Content | ConvertFrom-Json
+					$ivProps = if ($ivBody.PSObject.Properties['properties']) { $ivBody.properties } else { $null }
+					$ivView  = if ($null -ne $ivProps -and $ivProps.PSObject.Properties['instanceView']) { $ivProps.instanceView } else { $null }
+					if ($null -ne $ivView -and $ivView.PSObject.Properties['executionState']) {
+						$execState = $ivView.executionState
+						if ($execState -in @('Failed', 'TimedOut', 'Canceled')) {
+							$exitCode = if ($ivView.PSObject.Properties['exitCode']) { $ivView.exitCode } else { 'n/a' }
+							Write-Host "    [LocalDiscovery | $vmLabel] Instance view reports '$execState' (exit code: $exitCode) — aborting early."
+							return $null
+						}
+						# Detect stuck-at-Pending: if the command has been Pending for 90+ seconds
+						# and provisioningState is still Creating, the VM agent is not processing
+						# commands (broken handler, policy block, etc). Abort early so the caller
+						# can try a different VM.
+						if ($execState -eq 'Pending' -and $elapsed -ge 90) {
+							$provState = if ($null -ne $ivProps -and $ivProps.PSObject.Properties['provisioningState']) { $ivProps.provisioningState } else { 'unknown' }
+							if ($provState -eq 'Creating') {
+								Write-Host "    [LocalDiscovery | $vmLabel] Command stuck at Pending/Creating for ${elapsed}s — VM agent is not processing Run Commands. Aborting."
+								return '##AVD_VM_STUCK##'
+							}
+						}
+						Write-Host "    [LocalDiscovery | $vmLabel] Instance view: $execState"
+					}
+				}
+			}
+
 			$pollRsp = Invoke-AzRestMethod -Path $pollPath -Method GET -ErrorAction SilentlyContinue
 			if (-not $pollRsp) { continue }
 			if ($pollRsp.StatusCode -eq 202) { continue }  # still in progress
@@ -2255,40 +2445,63 @@ function Invoke-VmRunCommand {
 					$opStatus = $pollBody.status
 					if ($opStatus -in @('InProgress', 'Running')) { continue }
 					if ($opStatus -ne 'Succeeded') {
-						Write-Host "    [LocalDiscovery] Run Command v2 operation ended with status '$opStatus'."
-						Write-Host "    [LocalDiscovery] Full poll body: $($pollRsp.Content.Substring(0, [Math]::Min(800, $pollRsp.Content.Length)))"
+						Write-Host "    [LocalDiscovery | $vmLabel] Run Command v2 operation ended with status '$opStatus'."
+						Write-Host "    [LocalDiscovery | $vmLabel] Full poll body: $($pollRsp.Content.Substring(0, [Math]::Min(800, $pollRsp.Content.Length)))"
 						return $null
 					}
-					Write-Host "    [LocalDiscovery] Script execution completed (poll #$pollCount)."
+					Write-Host "    [LocalDiscovery | $vmLabel] Script execution completed (poll #$pollCount)."
 					break  # Succeeded — script has finished; fall through to GET.
 				}
-				Write-Host "    [LocalDiscovery] Poll response had no 'status' property (poll #$pollCount). Raw: $($pollRsp.Content.Substring(0, [Math]::Min(300, $pollRsp.Content.Length)))"
+				Write-Host "    [LocalDiscovery | $vmLabel] Poll response had no 'status' property (poll #$pollCount). Raw: $($pollRsp.Content.Substring(0, [Math]::Min(300, $pollRsp.Content.Length)))"
 				return $null
 			}
 
-			Write-Host "    [LocalDiscovery] Unexpected poll HTTP $($pollRsp.StatusCode) on attempt #$pollCount."
+			Write-Host "    [LocalDiscovery | $vmLabel] Unexpected poll HTTP $($pollRsp.StatusCode) on attempt #$pollCount."
 			return $null
 		}
 
 		if ((Get-Date) -ge $deadline) {
-			Write-Host "    [LocalDiscovery] Run Command v2 polling timed out after $TimeoutSeconds seconds ($pollCount poll(s))."
+			Write-Host "    [LocalDiscovery | $vmLabel] Run Command v2 polling timed out after $TimeoutSeconds seconds ($pollCount poll(s))."
+			# Fetch instanceView for diagnostics before returning — helps identify why the command stayed Pending.
+			$diagRsp = Invoke-AzRestMethod -Path $cmdPathView -Method GET -ErrorAction SilentlyContinue
+			if ($diagRsp -and $diagRsp.StatusCode -eq 200) {
+				$diagBody  = $diagRsp.Content | ConvertFrom-Json
+				$diagProps = if ($diagBody.PSObject.Properties['properties']) { $diagBody.properties } else { $null }
+				$diagView  = if ($null -ne $diagProps -and $diagProps.PSObject.Properties['instanceView']) { $diagProps.instanceView } else { $null }
+				if ($null -ne $diagView) {
+					$diagState = if ($diagView.PSObject.Properties['executionState']) { $diagView.executionState } else { 'unknown' }
+					$diagExit  = if ($diagView.PSObject.Properties['exitCode']) { $diagView.exitCode } else { 'n/a' }
+					Write-Host "    [LocalDiscovery | $vmLabel] Timeout diagnostics — state: $diagState, exitCode: $diagExit"
+					if ($diagView.PSObject.Properties['error'] -and $diagView.error) {
+						$errSnippet = ($diagView.error -replace '[\r\n]+', ' ').Substring(0, [Math]::Min(500, $diagView.error.Length))
+						Write-Host "    [LocalDiscovery | $vmLabel] stderr: $errSnippet"
+					}
+					if ($diagView.PSObject.Properties['output'] -and $diagView.output) {
+						$outSnippet = ($diagView.output -replace '[\r\n]+', ' ').Substring(0, [Math]::Min(500, $diagView.output.Length))
+						Write-Host "    [LocalDiscovery | $vmLabel] stdout: $outSnippet"
+					}
+				}
+				# Also check provisioning state on the resource itself
+				$provState = if ($null -ne $diagProps -and $diagProps.PSObject.Properties['provisioningState']) { $diagProps.provisioningState } else { 'unknown' }
+				Write-Host "    [LocalDiscovery | $vmLabel] provisioningState: $provState"
+			}
 			return $null
 		}
 
 		# Retrieve the result from the runCommands resource with $expand=instanceView.
 		# instanceView.output holds stdout without any character-count limit.
-		Write-Host "    [LocalDiscovery] Retrieving script output..."
+		Write-Host "    [LocalDiscovery | $vmLabel] Retrieving script output..."
 		$getResp = Invoke-AzRestMethod -Path $cmdPathView -Method GET -ErrorAction SilentlyContinue
 		if (-not $getResp -or $getResp.StatusCode -ne 200) {
 			$sc = if ($getResp) { $getResp.StatusCode } else { 'n/a' }
-			Write-Host "    [LocalDiscovery] Run Command v2 result GET returned HTTP $sc."
+			Write-Host "    [LocalDiscovery | $vmLabel] Run Command v2 result GET returned HTTP $sc."
 			return $null
 		}
 
 		$parsed = $getResp.Content | ConvertFrom-Json
 		$props  = $parsed.properties
 		if (-not $props -or -not $props.PSObject.Properties['instanceView']) {
-			Write-Host "    [LocalDiscovery] Run Command v2 instanceView not found in GET response."
+			Write-Host "    [LocalDiscovery | $vmLabel] Run Command v2 instanceView not found in GET response."
 			return $null
 		}
 		$instView = $props.instanceView
@@ -2300,7 +2513,7 @@ function Invoke-VmRunCommand {
 	finally {
 		# Always clean up the runCommands child resource — errors here are suppressed
 		# so they do not mask any exception already in flight.
-		Write-Host "    [LocalDiscovery] Cleaning up Run Command resource '$cmdName'..."
+		Write-Host "    [LocalDiscovery | $vmLabel] Cleaning up Run Command resource '$cmdName'..."
 		Invoke-AzRestMethod -Path $cmdPath -Method DELETE -ErrorAction SilentlyContinue | Out-Null
 	}
 }
@@ -2336,14 +2549,15 @@ function Read-VmFileInChunks {
 		[int]$TimeoutSeconds = 90
 	)
 
+	$vmLabel    = ($VmResourceId -split '/')[-1]
 	$chunkCount = [Math]::Ceiling($FileLength / $ChunkSize)
-	Write-Host "    [LocalDiscovery] Reading output in $chunkCount chunk(s) ($FileLength chars total)..."
+	Write-Host "    [LocalDiscovery | $vmLabel] Reading output in $chunkCount chunk(s) ($FileLength chars total)..."
 
 	$sb = [System.Text.StringBuilder]::new($FileLength)
 
 	for ($i = 0; $i -lt $chunkCount; $i++) {
 		$offset = $i * $ChunkSize
-		Write-Host "    [LocalDiscovery] Chunk $($i + 1)/$chunkCount (offset $offset)..."
+		Write-Host "    [LocalDiscovery | $vmLabel] Chunk $($i + 1)/$chunkCount (offset $offset)..."
 
 		$chunkScript = @(
 			"`$p = '$FilePath'",
@@ -2360,14 +2574,14 @@ function Read-VmFileInChunks {
 			-TimeoutSeconds $TimeoutSeconds -InitialPollSeconds 3
 
 		if ([string]::IsNullOrEmpty($chunkOut)) {
-			Write-Warning "[LocalDiscovery] Empty response for chunk $($i + 1)/$chunkCount."
+			Write-Warning "[LocalDiscovery | $vmLabel] Empty response for chunk $($i + 1)/$chunkCount."
 			return $null
 		}
 
 		$s = $chunkOut.IndexOf('##CHUNK_START##')
 		$e = $chunkOut.IndexOf('##CHUNK_END##')
 		if ($s -lt 0 -or $e -lt 0 -or $e -le $s) {
-			Write-Warning "[LocalDiscovery] Chunk $($i + 1) markers not found. Output: $($chunkOut.Substring(0, [Math]::Min(200, $chunkOut.Length)))"
+			Write-Warning "[LocalDiscovery | $vmLabel] Chunk $($i + 1) markers not found. Output: $($chunkOut.Substring(0, [Math]::Min(200, $chunkOut.Length)))"
 			return $null
 		}
 
@@ -2387,18 +2601,25 @@ function Invoke-HostPoolLocalDiscovery {
 	vm-discovery output directory. Non-fatal — logs a warning and continues on failure.
 
 	.DESCRIPTION
-	A small bootstrap script is sent as the Run Command payload. On the VM it downloads
+	A small bootstrap script is sent as the Run Command payload. By default it downloads
 	LocalScript.ps1 and appExclusions.config.json directly from the GitHub repository
-	(raw.githubusercontent.com) using Invoke-WebRequest, executes the script into a
-	temp directory, writes the GZip-compressed base64-encoded JSON to a staging file,
-	and returns just the file path and size via stdout. The caller then reads the staging
-	file back in fixed-size chunks (Run Command stdout is limited to the last 4,096 chars
-	by the Azure VM Agent), assembles the payload, decodes it, and writes it to the
-	vm-discovery folder. The staging file is deleted after retrieval.
+	(raw.githubusercontent.com) using Invoke-WebRequest.
+
+	When -InlineLocalScript is specified, the bootstrap instead carries both files
+	embedded as base64-encoded strings and writes them to a temp directory on the VM,
+	eliminating the need for outbound HTTPS access to GitHub.
+
+	In either mode, the bootstrap executes LocalScript.ps1 into a temp directory, writes
+	the GZip-compressed base64-encoded JSON to a staging file, and returns just the file
+	path and size via stdout. The caller then reads the staging file back in fixed-size
+	chunks (Run Command stdout is limited to the last 4,096 chars by the Azure VM Agent),
+	assembles the payload, decodes it, and writes it to the vm-discovery folder. The
+	staging file is deleted after retrieval.
 
 	Requires the authenticated account to have 'Virtual Machine Contributor' or
 	'Virtual Machine Run Command Contributor' rights on the session host VMs.
-	The session host must have outbound HTTPS access to raw.githubusercontent.com.
+	When not using -InlineLocalScript, the session host must have outbound HTTPS access
+	to raw.githubusercontent.com.
 	#>
 	param(
 		[Parameter(Mandatory = $true)]
@@ -2415,118 +2636,266 @@ function Invoke-HostPoolLocalDiscovery {
 		[string]$VmDiscoveryDirectory,
 
 		[Parameter(Mandatory = $true)]
-		[string]$GitHubRawBaseUrl
+		[string]$GitHubRawBaseUrl,
+
+		[Parameter(Mandatory = $false)]
+		[int]$TimeoutSeconds = 300,
+
+		[Parameter(Mandatory = $false)]
+		[switch]$InlineLocalScript,
+
+		[Parameter(Mandatory = $false)]
+		[AllowNull()]
+		[PSCustomObject]$RunAsCredential
 	)
 
 	if (@($VmResourceIds).Count -eq 0) {
-		Write-Host "    [LocalDiscovery] No session host VMs registered in '$($Pool.Name)' — skipping."
+		Write-Host "    [LocalDiscovery | $($Pool.Name)] No session host VMs registered — skipping."
 		return
 	}
 
-	# Find the first VM in the running power state
-	$targetVmId = $null
+	# Collect all running VMs so we can fall back to the next one if a VM's agent is stuck.
+	$runningVmIds = @()
 	foreach ($vmId in $VmResourceIds) {
-		Write-Host "    [LocalDiscovery] Checking power state: $(($vmId -split '/')[-1])"
+		$candidateName = ($vmId -split '/')[-1]
+		Write-Host "    [LocalDiscovery | $($Pool.Name)] Checking power state: $candidateName"
 		$state = Get-VmPowerState -VmResourceId $vmId
 		if ($state -eq 'PowerState/running') {
-			$targetVmId = $vmId
-			break
+			$runningVmIds += $vmId
 		}
 	}
 
-	if ([string]::IsNullOrEmpty($targetVmId)) {
-		Write-Host "    [LocalDiscovery] No running hosts found in pool '$($Pool.Name)' — skipping."
+	if ($runningVmIds.Count -eq 0) {
+		Write-Host "    [LocalDiscovery | $($Pool.Name)] No running hosts found — skipping."
 		return
 	}
 
-	$vmName          = ($targetVmId -split '/')[-1]
+	Write-Host "    [LocalDiscovery | $($Pool.Name)] Found $($runningVmIds.Count) running host(s)."
+
 	$scriptUrl       = "$GitHubRawBaseUrl/LocalScript.ps1"
 	$configUrl       = "$GitHubRawBaseUrl/appExclusions.config.json"
 	$custCodeEscaped = $CustomerCode -replace "'", "''"
 
-	Write-Host "    [LocalDiscovery] Target VM: $vmName"
-	Write-Host "    [LocalDiscovery] Fetching script from: $scriptUrl"
+	# --- Build the wrapper script (same for all VMs in this pool) ---
+	$wrapperLines  = $null
+	$wrapperParams = @()
 
-	# Bootstrap sent as the Run Command payload. Downloads both files from GitHub then
-	# executes LocalScript.ps1. JSON output is GZip-compressed and base64-encoded so it
-	# travels cleanly through the Run Command stdout channel.
-	$wrapperLines = @(
-		"`$scriptUrl = '$scriptUrl'",
-		"`$configUrl = '$configUrl'",
-		"`$cCode     = '$custCodeEscaped'",
-		'$ErrorActionPreference = "Stop"',
-		'try {',
-		'    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12',
-		'    $id      = [Guid]::NewGuid().ToString("N")',
-		'    $tmp     = Join-Path ([System.IO.Path]::GetTempPath()) "avd-disc-$id"',
-		'    $scrPath = Join-Path $tmp "LocalScript.ps1"',
-		'    $cfgPath = Join-Path $tmp "appExclusions.config.json"',
-		'    $outDir  = Join-Path $tmp "output"',
-		'    New-Item -ItemType Directory -Path $tmp    -Force | Out-Null',
-		'    New-Item -ItemType Directory -Path $outDir -Force | Out-Null',
-		'    Invoke-WebRequest -Uri $scriptUrl -OutFile $scrPath -UseBasicParsing',
-		'    Invoke-WebRequest -Uri $configUrl -OutFile $cfgPath -UseBasicParsing',
-		("    & `$scrPath -CustomerAbbreviation `$cCode -OutputDirectory `$outDir -PrimaryApplicationsOnly$(if ($NoGpresult.IsPresent) { ' -NoGpresult' }) -ErrorAction Stop *>&1 | Out-Null"),
-		'    $jf = Get-ChildItem -Path $outDir -Filter "*.json" -File | Select-Object -First 1',
-		'    if (-not $jf) { throw "No JSON output produced by LocalScript.ps1" }',
-		'    $jb  = [System.IO.File]::ReadAllBytes($jf.FullName)',
-		'    $cms = [System.IO.MemoryStream]::new()',
-		'    $cgz = [System.IO.Compression.GZipStream]::new($cms, [System.IO.Compression.CompressionMode]::Compress)',
-		'    $cgz.Write($jb, 0, $jb.Length)',
-		'    $cgz.Close()',
-		'    $b64     = [Convert]::ToBase64String($cms.ToArray())',
-		'    $stgPath = Join-Path ([System.IO.Path]::GetTempPath()) ("avd-stage-$id.b64")',
-		'    [System.IO.File]::WriteAllText($stgPath, $b64, [System.Text.Encoding]::ASCII)',
-		'    Write-Output "##AVD_FILE##$stgPath##SIZE##$($b64.Length)##JSON##$($jb.Length)##"',
-		'    $hf = Get-ChildItem -Path $outDir -Filter "*.gpresult.html" -File | Select-Object -First 1',
-		'    if ($hf) {',
-		'        $hb  = [System.IO.File]::ReadAllBytes($hf.FullName)',
-		'        $hms = [System.IO.MemoryStream]::new()',
-		'        $hgz = [System.IO.Compression.GZipStream]::new($hms, [System.IO.Compression.CompressionMode]::Compress)',
-		'        $hgz.Write($hb, 0, $hb.Length)',
-		'        $hgz.Close()',
-		'        $hb64     = [Convert]::ToBase64String($hms.ToArray())',
-		'        $hstgPath = Join-Path ([System.IO.Path]::GetTempPath()) ("avd-stage-$id-gp.b64")',
-		'        [System.IO.File]::WriteAllText($hstgPath, $hb64, [System.Text.Encoding]::ASCII)',
-		'        Write-Output "##AVD_GPRESULT##$hstgPath##SIZE##$($hb64.Length)##HTML##$($hb.Length)##"',
-		'    }',
-		'} catch {',
-		'    $errMsg = ($_.Exception.Message -replace "[\r\n]+", " ").Trim()',
-		'    Write-Output "##AVD_LOCAL_DISCOVERY_ERROR##$errMsg"',
-		'} finally {',
-		'    if ($tmp -and (Test-Path $tmp)) { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }',
-		'}'
-	)
+	if ($InlineLocalScript.IsPresent) {
+		# --- Inline mode: embed the script files directly in the Run Command payload ---
+		$localScriptPath = Join-Path $PSScriptRoot 'LocalScript.ps1'
+		$localConfigPath = Join-Path $PSScriptRoot 'appExclusions.config.json'
+		if (-not (Test-Path $localScriptPath)) { Write-Warning "[LocalDiscovery | $($Pool.Name)] LocalScript.ps1 not found at '$localScriptPath' — cannot inline."; return }
+		if (-not (Test-Path $localConfigPath)) { Write-Warning "[LocalDiscovery | $($Pool.Name)] appExclusions.config.json not found at '$localConfigPath' — cannot inline."; return }
 
-	# Run the bootstrap wrapper. It downloads LocalScript.ps1, executes it, compresses
-	# the output, and writes the base64 payload to a staging file — returning just the
-	# path and size via stdout (stdout itself is limited to the last 4,096 chars).
+		$scriptB64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($localScriptPath))
+		$configB64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($localConfigPath))
+
+		Write-Host "    [LocalDiscovery | $($Pool.Name)] Inline mode — embedding LocalScript.ps1 ($([Math]::Round($scriptB64.Length / 1KB, 1)) KB b64) + config ($([Math]::Round($configB64.Length / 1KB, 1)) KB b64)"
+
+		# Build the base64 assignment as a concatenation of small chunks rather than
+		# one enormous string literal. PowerShell 5.1 is extremely slow to parse a single
+		# 128 KB string token, but handles many 4 KB concatenations quickly.
+		$chunkSize = 4000
+		function Split-Base64ToChunkedAssignment {
+			param([string]$VarName, [string]$Base64)
+			if ($Base64.Length -le $chunkSize) {
+				return "`$$VarName = '$Base64'"
+			}
+			$parts = [System.Collections.Generic.List[string]]::new()
+			for ($i = 0; $i -lt $Base64.Length; $i += $chunkSize) {
+				$len = [Math]::Min($chunkSize, $Base64.Length - $i)
+				$parts.Add("'$($Base64.Substring($i, $len))'")
+			}
+			return "`$$VarName = $($parts -join ' + ')"
+		}
+		$scrAssignment = Split-Base64ToChunkedAssignment -VarName 'scrB64' -Base64 $scriptB64
+		$cfgAssignment = Split-Base64ToChunkedAssignment -VarName 'cfgB64' -Base64 $configB64
+
+		# The wrapper decodes the embedded base64 content to files on the VM, then
+		# executes LocalScript.ps1 identically to the GitHub-download path.
+		$wrapperLines = @(
+			$scrAssignment,
+			$cfgAssignment,
+			"`$cCode = '$custCodeEscaped'",
+			'$ErrorActionPreference = "Stop"',
+			'try {',
+			'    $id      = [Guid]::NewGuid().ToString("N")',
+			'    $tmp     = Join-Path ([System.IO.Path]::GetTempPath()) "avd-disc-$id"',
+			'    $scrPath = Join-Path $tmp "LocalScript.ps1"',
+			'    $cfgPath = Join-Path $tmp "appExclusions.config.json"',
+			'    $outDir  = Join-Path $tmp "output"',
+			'    New-Item -ItemType Directory -Path $tmp    -Force | Out-Null',
+			'    New-Item -ItemType Directory -Path $outDir -Force | Out-Null',
+			'    [System.IO.File]::WriteAllBytes($scrPath, [Convert]::FromBase64String($scrB64))',
+			'    [System.IO.File]::WriteAllBytes($cfgPath, [Convert]::FromBase64String($cfgB64))',
+			("    & `$scrPath -CustomerAbbreviation `$cCode -OutputDirectory `$outDir -PrimaryApplicationsOnly$(if ($NoGpresult.IsPresent) { ' -NoGpresult' }) -ErrorAction Stop *>&1 | Out-Null"),
+			'    $jf = Get-ChildItem -Path $outDir -Filter "*.json" -File | Select-Object -First 1',
+			'    if (-not $jf) { throw "No JSON output produced by LocalScript.ps1" }',
+			'    $jb  = [System.IO.File]::ReadAllBytes($jf.FullName)',
+			'    $cms = [System.IO.MemoryStream]::new()',
+			'    $cgz = [System.IO.Compression.GZipStream]::new($cms, [System.IO.Compression.CompressionMode]::Compress)',
+			'    $cgz.Write($jb, 0, $jb.Length)',
+			'    $cgz.Close()',
+			'    $b64     = [Convert]::ToBase64String($cms.ToArray())',
+			'    $stgPath = Join-Path ([System.IO.Path]::GetTempPath()) ("avd-stage-$id.b64")',
+			'    [System.IO.File]::WriteAllText($stgPath, $b64, [System.Text.Encoding]::ASCII)',
+			'    Write-Output "##AVD_FILE##$stgPath##SIZE##$($b64.Length)##JSON##$($jb.Length)##"',
+			'    $hf = Get-ChildItem -Path $outDir -Filter "*.gpresult.html" -File | Select-Object -First 1',
+			'    if ($hf) {',
+			'        $hb  = [System.IO.File]::ReadAllBytes($hf.FullName)',
+			'        $hms = [System.IO.MemoryStream]::new()',
+			'        $hgz = [System.IO.Compression.GZipStream]::new($hms, [System.IO.Compression.CompressionMode]::Compress)',
+			'        $hgz.Write($hb, 0, $hb.Length)',
+			'        $hgz.Close()',
+			'        $hb64     = [Convert]::ToBase64String($hms.ToArray())',
+			'        $hstgPath = Join-Path ([System.IO.Path]::GetTempPath()) ("avd-stage-$id-gp.b64")',
+			'        [System.IO.File]::WriteAllText($hstgPath, $hb64, [System.Text.Encoding]::ASCII)',
+			'        Write-Output "##AVD_GPRESULT##$hstgPath##SIZE##$($hb64.Length)##HTML##$($hb.Length)##"',
+			'    }',
+			'} catch {',
+			'    $errMsg = ($_.Exception.Message -replace "[\r\n]+", " ").Trim()',
+			'    $errLine = if ($_.InvocationInfo) { "line $($_.InvocationInfo.ScriptLineNumber) in $($_.InvocationInfo.ScriptName)" } else { "unknown location" }',
+			'    Write-Output "##AVD_LOCAL_DISCOVERY_ERROR##[$errLine] $errMsg"',
+			'} finally {',
+			'    if ($tmp -and (Test-Path $tmp)) { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }',
+			'}'
+		)
+		$wrapperParams = @()
+	}
+	else {
+		# --- GitHub mode (default): download files on the VM at runtime ---
+		Write-Host "    [LocalDiscovery | $($Pool.Name)] Fetching script from: $scriptUrl"
+
+		# Bootstrap sent as the Run Command payload. Downloads both files from GitHub then
+		# executes LocalScript.ps1. JSON output is GZip-compressed and base64-encoded so it
+		# travels cleanly through the Run Command stdout channel.
+		$wrapperLines = @(
+			"`$scriptUrl = '$scriptUrl'",
+			"`$configUrl = '$configUrl'",
+			"`$cCode     = '$custCodeEscaped'",
+			'$ErrorActionPreference = "Stop"',
+			'try {',
+			'    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12',
+			'    $id      = [Guid]::NewGuid().ToString("N")',
+			'    $tmp     = Join-Path ([System.IO.Path]::GetTempPath()) "avd-disc-$id"',
+			'    $scrPath = Join-Path $tmp "LocalScript.ps1"',
+			'    $cfgPath = Join-Path $tmp "appExclusions.config.json"',
+			'    $outDir  = Join-Path $tmp "output"',
+			'    New-Item -ItemType Directory -Path $tmp    -Force | Out-Null',
+			'    New-Item -ItemType Directory -Path $outDir -Force | Out-Null',
+			'    Invoke-WebRequest -Uri $scriptUrl -OutFile $scrPath -UseBasicParsing',
+			'    Invoke-WebRequest -Uri $configUrl -OutFile $cfgPath -UseBasicParsing',
+			("    & `$scrPath -CustomerAbbreviation `$cCode -OutputDirectory `$outDir -PrimaryApplicationsOnly$(if ($NoGpresult.IsPresent) { ' -NoGpresult' }) -ErrorAction Stop *>&1 | Out-Null"),
+			'    $jf = Get-ChildItem -Path $outDir -Filter "*.json" -File | Select-Object -First 1',
+			'    if (-not $jf) { throw "No JSON output produced by LocalScript.ps1" }',
+			'    $jb  = [System.IO.File]::ReadAllBytes($jf.FullName)',
+			'    $cms = [System.IO.MemoryStream]::new()',
+			'    $cgz = [System.IO.Compression.GZipStream]::new($cms, [System.IO.Compression.CompressionMode]::Compress)',
+			'    $cgz.Write($jb, 0, $jb.Length)',
+			'    $cgz.Close()',
+			'    $b64     = [Convert]::ToBase64String($cms.ToArray())',
+			'    $stgPath = Join-Path ([System.IO.Path]::GetTempPath()) ("avd-stage-$id.b64")',
+			'    [System.IO.File]::WriteAllText($stgPath, $b64, [System.Text.Encoding]::ASCII)',
+			'    Write-Output "##AVD_FILE##$stgPath##SIZE##$($b64.Length)##JSON##$($jb.Length)##"',
+			'    $hf = Get-ChildItem -Path $outDir -Filter "*.gpresult.html" -File | Select-Object -First 1',
+			'    if ($hf) {',
+			'        $hb  = [System.IO.File]::ReadAllBytes($hf.FullName)',
+			'        $hms = [System.IO.MemoryStream]::new()',
+			'        $hgz = [System.IO.Compression.GZipStream]::new($hms, [System.IO.Compression.CompressionMode]::Compress)',
+			'        $hgz.Write($hb, 0, $hb.Length)',
+			'        $hgz.Close()',
+			'        $hb64     = [Convert]::ToBase64String($hms.ToArray())',
+			'        $hstgPath = Join-Path ([System.IO.Path]::GetTempPath()) ("avd-stage-$id-gp.b64")',
+			'        [System.IO.File]::WriteAllText($hstgPath, $hb64, [System.Text.Encoding]::ASCII)',
+			'        Write-Output "##AVD_GPRESULT##$hstgPath##SIZE##$($hb64.Length)##HTML##$($hb.Length)##"',
+			'    }',
+			'} catch {',
+			'    $errMsg = ($_.Exception.Message -replace "[\r\n]+", " ").Trim()',
+			'    $errLine = if ($_.InvocationInfo) { "line $($_.InvocationInfo.ScriptLineNumber) in $($_.InvocationInfo.ScriptName)" } else { "unknown location" }',
+			'    Write-Output "##AVD_LOCAL_DISCOVERY_ERROR##[$errLine] $errMsg"',
+			'} finally {',
+			'    if ($tmp -and (Test-Path $tmp)) { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }',
+			'}'
+		)
+		$wrapperParams = @()
+	}
+
+	# --- Try each running VM until one succeeds or all are exhausted ---
+	# VMs can have broken Run Command handlers (agent stuck, policy blocked, etc).
+	# If a VM returns ##AVD_VM_STUCK## (Pending/Creating for 90+ seconds), skip it
+	# and try the next running host.
+	$stuckCount = 0
+	foreach ($targetVmId in $runningVmIds) {
+		$vmName = ($targetVmId -split '/')[-1]
+		Write-Host "    [LocalDiscovery | $vmName] Target VM selected$(if ($null -ne $RunAsCredential) { " — run-as: $($RunAsCredential.Username)" })"
+
+	# Run the bootstrap wrapper. It executes LocalScript.ps1 (downloaded or inlined),
+	# compresses the output, and writes the base64 payload to a staging file — returning
+	# just the path and size via stdout (stdout itself is limited to the last 4,096 chars).
 	$stdout = $null
 	try {
-		$stdout = Invoke-VmRunCommand -VmResourceId $targetVmId -Script $wrapperLines -TimeoutSeconds 600
+		$stdout = Invoke-VmRunCommand -VmResourceId $targetVmId -Script $wrapperLines -Parameters $wrapperParams -TimeoutSeconds $TimeoutSeconds -RunAsCredential $RunAsCredential
 	}
 	catch {
-		Write-Warning "[LocalDiscovery] Run Command submission failed for '$vmName': $($_.Exception.Message)"
-		return
+		Write-Warning "[LocalDiscovery | $vmName] Run Command submission failed: $($_.Exception.Message)"
+		continue
+	}
+
+	# If the VM agent is stuck (not processing commands), show an advisory on the first
+	# occurrence and prompt the user — then try the next VM regardless.
+	if ($stdout -eq '##AVD_VM_STUCK##') {
+		$stuckCount++
+		if ($stuckCount -eq 1) {
+			$_w  = 73
+			$_hr = '─' * $_w
+			Write-Host ''
+			Write-Host "    ┌$_hr┐" -ForegroundColor Yellow
+			foreach ($_s in @(
+				'',
+				'  Run Command appears to be blocked on this host pool',
+				'',
+				'  The VM agent is not processing commands — likely caused by:',
+				'    • Endpoint security (Defender/MDE) blocking script execution',
+				'    • A network policy blocking the Azure wireserver (168.63.129.16)',
+				'    • A stuck VM agent goal-state queue (restart WindowsAzureGuestAgent)',
+				'',
+				'  RECOMMENDED: Cancel (Ctrl+C) and run LocalScript.ps1 directly on the',
+				'  session host. Access the VM using any of the following methods:',
+				'',
+				"    1. RDP or Azure Bastion to:         $vmName",
+				"    2. RMM tool or LogicMonitor to:     $vmName",
+				'',
+				'    Then run: .\LocalScript.ps1 -CustomerAbbreviation <code>',
+				'',
+				'  Continuing to try remaining hosts — press Ctrl+C to cancel.',
+				''
+			)) {
+				Write-Host "    │$($_s.PadRight($_w))│" -ForegroundColor Yellow
+			}
+			Write-Host "    └$_hr┘" -ForegroundColor Yellow
+			Write-Host ''
+		}
+		Write-Host "    [LocalDiscovery | $vmName] Skipping — trying next running host..."
+		continue
 	}
 
 	if ([string]::IsNullOrEmpty($stdout)) {
-		Write-Warning "[LocalDiscovery] Run Command returned no output from '$vmName'. Verify the VM agent is running and the caller has 'Virtual Machine Contributor' rights."
-		return
+		Write-Warning "[LocalDiscovery | $vmName] Run Command returned no output. Verify the VM agent is running and the caller has 'Virtual Machine Contributor' rights."
+		continue
 	}
 
 	# Script-level error reported by the wrapper.
 	if ($stdout -match '(?s)##AVD_LOCAL_DISCOVERY_ERROR##(.+)') {
-		Write-Warning "[LocalDiscovery] LocalScript.ps1 reported an error on '$vmName': $($Matches[1].Trim())"
-		return
+		Write-Warning "[LocalDiscovery | $vmName] LocalScript.ps1 reported an error: $($Matches[1].Trim())"
+		continue
 	}
 
 	# Parse the staging file path and character count.
 	if ($stdout -notmatch '##AVD_FILE##(.+?)##SIZE##(\d+)##') {
 		$diagLen  = $stdout.Length
 		$diagHead = $stdout.Substring(0, [Math]::Min(300, $diagLen))
-		Write-Warning "[LocalDiscovery] Staging file marker not found in response from '$vmName' ($diagLen chars). Output: $diagHead"
-		return
+		Write-Warning "[LocalDiscovery | $vmName] Staging file marker not found in response ($diagLen chars). Output: $diagHead"
+		continue
 	}
 	$stagingPath = $Matches[1].Trim()
 	$fileSize    = [int]$Matches[2]
@@ -2535,7 +2904,7 @@ function Invoke-HostPoolLocalDiscovery {
 		$rawJsonBytes = [int64]$Matches[1]
 		$rawJsonSize  = " (raw JSON: $([Math]::Round($rawJsonBytes / 1KB, 1)) KB)"
 	}
-	Write-Host "    [LocalDiscovery] Staging file written: $stagingPath ($fileSize chars)$rawJsonSize"
+	Write-Host "    [LocalDiscovery | $vmName] Staging file written: $stagingPath ($fileSize chars)$rawJsonSize"
 
 	# Read the staging file back in chunks, then delete it regardless of success or failure.
 	$b64Payload = $null
@@ -2543,14 +2912,14 @@ function Invoke-HostPoolLocalDiscovery {
 		$b64Payload = Read-VmFileInChunks -VmResourceId $targetVmId -FilePath $stagingPath -FileLength $fileSize
 	}
 	finally {
-		Write-Host "    [LocalDiscovery] Deleting staging file..."
+		Write-Host "    [LocalDiscovery | $vmName] Deleting staging file..."
 		$cleanupLines = @("if (Test-Path '$stagingPath') { Remove-Item -Path '$stagingPath' -Force -ErrorAction SilentlyContinue }")
 		Invoke-VmRunCommand -VmResourceId $targetVmId -Script $cleanupLines -TimeoutSeconds 60 -InitialPollSeconds 3 | Out-Null
 	}
 
 	if ([string]::IsNullOrEmpty($b64Payload)) {
-		Write-Warning "[LocalDiscovery] Failed to retrieve data from staging file on '$vmName'."
-		return
+		Write-Warning "[LocalDiscovery | $vmName] Failed to retrieve data from staging file."
+		continue
 	}
 
 	try {
@@ -2563,8 +2932,8 @@ function Invoke-HostPoolLocalDiscovery {
 		$jsonContent = [System.Text.Encoding]::UTF8.GetString($outMs.ToArray())
 	}
 	catch {
-		Write-Warning "[LocalDiscovery] Failed to decompress/decode output from '$vmName': $($_.Exception.Message)"
-		return
+		Write-Warning "[LocalDiscovery | $vmName] Failed to decompress/decode output: $($_.Exception.Message)"
+		continue
 	}
 
 	if (-not (Test-Path -Path $VmDiscoveryDirectory)) {
@@ -2574,7 +2943,7 @@ function Invoke-HostPoolLocalDiscovery {
 	$timestamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
 	$outputFile = Join-Path $VmDiscoveryDirectory "$CustomerCode-$($vmName.ToLowerInvariant())-avd-discovery-$timestamp.json"
 	[System.IO.File]::WriteAllText($outputFile, $jsonContent, [System.Text.Encoding]::UTF8)
-	Write-Host "    [LocalDiscovery] Saved: $outputFile"
+	Write-Host "    [LocalDiscovery | $vmName] Saved: $outputFile"
 
 	# Retrieve and save the gpresult HTML report if the VM staged one.
 	if ($stdout -match '##AVD_GPRESULT##(.+?)##SIZE##(\d+)##') {
@@ -2582,7 +2951,7 @@ function Invoke-HostPoolLocalDiscovery {
 		$gpFileSize = [int]$Matches[2]
 		$gpHtmlSize = ''
 		if ($stdout -match '##HTML##(\d+)##') { $gpHtmlSize = " (HTML: $([Math]::Round([int64]$Matches[1] / 1KB, 1)) KB)" }
-		Write-Host "    [LocalDiscovery] Retrieving gpresult HTML ($gpFileSize chars)$gpHtmlSize..."
+		Write-Host "    [LocalDiscovery | $vmName] Retrieving gpresult HTML ($gpFileSize chars)$gpHtmlSize..."
 		$gpB64 = $null
 		try {
 			$gpB64 = Read-VmFileInChunks -VmResourceId $targetVmId -FilePath $gpStgPath -FileLength $gpFileSize
@@ -2601,13 +2970,19 @@ function Invoke-HostPoolLocalDiscovery {
 				$gpGz.Close()
 				$gpHtmlPath = [System.IO.Path]::ChangeExtension($outputFile, '.gpresult.html')
 				[System.IO.File]::WriteAllBytes($gpHtmlPath, $gpOutMs.ToArray())
-				Write-Host "    [LocalDiscovery] Saved gpresult: $gpHtmlPath"
+				Write-Host "    [LocalDiscovery | $vmName] Saved gpresult: $gpHtmlPath"
 			}
 			catch {
-				Write-Warning "    [LocalDiscovery] Failed to decode gpresult HTML from '$vmName': $($_.Exception.Message)"
+				Write-Warning "[LocalDiscovery | $vmName] Failed to decode gpresult HTML: $($_.Exception.Message)"
 			}
 		}
 	}
+	# Success — this VM worked, stop trying others.
+	return
+	}
+
+	# All running VMs exhausted without success
+	Write-Warning "[LocalDiscovery | $($Pool.Name)] All $($runningVmIds.Count) running host(s) failed or had stuck agents — local discovery could not be completed."
 }
 
 # ------------------------------------------------------------------
@@ -2658,7 +3033,10 @@ try {
 	Write-Host "  Exclude weekends: $($ExcludeWeekends.IsPresent)"
 	Write-Host "  Peak hours only : $($PeakHoursOnly.IsPresent)$(if ($PeakHoursOnly.IsPresent) { " (09:00–18:00 local, UTC$([string]::Format('{0:+0;-0}', $UtcOffsetHours))" + ')' })"
 	Write-Host "  Host pool filter: $(if ($HostPoolName -and @($HostPoolName).Count -gt 0) { $HostPoolName -join ', ' } else { '(all pools)' })"
-	Write-Host "  Local discovery : $($RunLocalDiscovery.IsPresent)$(if ($RunLocalDiscovery.IsPresent) { " — $gitHubRawBaseUrl" })"
+	Write-Host "  Local discovery : $($RunLocalDiscovery.IsPresent)$(if ($RunLocalDiscovery.IsPresent) { if ($InlineLocalScript.IsPresent) { ' — inline (local files embedded in payload)' } else { " — $gitHubRawBaseUrl" }; " [timeout: ${LocalDiscoveryTimeout}s]" })"
+	if ($RunLocalDiscovery.IsPresent -and $RunAsUser.IsPresent) {
+		Write-Host "  Run-as user     : (will prompt)"
+	}
 	Write-Host ""
 
 	Write-Host "Discovering host pools..."
@@ -2669,6 +3047,15 @@ try {
 		if ($hostPools.Count -eq 0) {
 			throw "No host pools matched the specified -HostPoolName filter: $($HostPoolName -join ', ')"
 		}
+	}
+
+	# Collect run-as credentials after host pool discovery so the prompt
+	# appears once (not per-pool) and only when there are pools to process.
+	$runAsCredential = $null
+	if ($RunLocalDiscovery.IsPresent -and $RunAsUser.IsPresent -and $hostPools.Count -gt 0) {
+		$runAsCredential = Get-RunAsCredential
+		Write-Host "  Run-as user     : $($runAsCredential.Username)"
+		Write-Host ""
 	}
 	Write-Host "Found $($hostPools.Count) host pool(s) across $(@($subscriptions).Count) subscription(s)."
 	Write-Host ""
@@ -2759,7 +3146,7 @@ try {
 		foreach ($uid in $authUsers.AuthorizedUserIds) { $allAuthorizedUserIds.Add($uid) | Out-Null }
 
 		if ($RunLocalDiscovery.IsPresent -and @($infra.VmResourceIds).Count -gt 0) {
-			Invoke-HostPoolLocalDiscovery -Pool $pool -VmResourceIds @($infra.VmResourceIds) -CustomerCode $customerCode -VmDiscoveryDirectory $resolvedVmDiscoveryDirectory -GitHubRawBaseUrl $gitHubRawBaseUrl
+			Invoke-HostPoolLocalDiscovery -Pool $pool -VmResourceIds @($infra.VmResourceIds) -CustomerCode $customerCode -VmDiscoveryDirectory $resolvedVmDiscoveryDirectory -GitHubRawBaseUrl $gitHubRawBaseUrl -InlineLocalScript:$InlineLocalScript -TimeoutSeconds $LocalDiscoveryTimeout -RunAsCredential $runAsCredential
 		}
 
 		[PSCustomObject]@{
