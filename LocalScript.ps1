@@ -1710,13 +1710,9 @@ function Get-ActiveDirectoryDependencyDiscovery {
 	[PSCustomObject]@{
 		HasDomainDependencies    = $hasDependencies
 		DomainServiceCount       = @($domainServices).Count
-		DomainServices           = @($domainServices)
 		DomainScheduledTaskCount = @($domainTasks).Count
-		DomainScheduledTasks     = @($domainTasks)
 		DomainOdbcSourceCount    = @($odbcSources).Count
-		DomainOdbcSources        = @($odbcSources)
 		AdPortConnectionCount    = @($adConnections).Count
-		AdPortConnections        = @($adConnections)
 	}
 }
 
