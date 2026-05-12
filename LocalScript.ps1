@@ -474,9 +474,6 @@ function Get-LapsDiscovery {
 		WindowsLapsConfigured    = $windowsLapsConfigured
 		LegacyLapsConfigured     = $legacyLapsConfigured
 		BackupDirectory          = $windowsBackupDirectory
-		WindowsLapsPolicy        = $windowsLapsPolicy
-		WindowsLapsPolicyManager = $windowsLapsPolicyManager
-		LegacyLapsPolicy         = $legacyLapsPolicy
 		LegacyLapsDllPresent     = Test-Path -Path $legacyLapsDllPath
 	}
 }
@@ -495,7 +492,6 @@ function Get-OutlookCachedModeDiscovery {
 			Enable        = Get-OptionalPropertyValue -Object $values -PropertyName 'Enable'
 			SyncWindowSetting = Get-OptionalPropertyValue -Object $values -PropertyName 'SyncWindowSetting'
 			SyncWindowSettingDays = Get-OptionalPropertyValue -Object $values -PropertyName 'SyncWindowSettingDays'
-			RawValues     = $values
 		}
 	}
 
@@ -512,7 +508,6 @@ function Get-OutlookCachedModeDiscovery {
 				Enable        = Get-OptionalPropertyValue -Object $values -PropertyName 'Enable'
 				SyncWindowSetting = Get-OptionalPropertyValue -Object $values -PropertyName 'SyncWindowSetting'
 				SyncWindowSettingDays = Get-OptionalPropertyValue -Object $values -PropertyName 'SyncWindowSettingDays'
-				RawValues     = $values
 			}
 		}
 
@@ -661,10 +656,7 @@ function Get-FSLogixAppMaskingDiscovery {
 		EffectiveEnabled   = if ($null -eq $effectiveConfig) { $null } else { Get-OptionalPropertyValue -Object $effectiveConfig -PropertyName 'Enabled' }
 		RuleDirectories    = @($ruleDirectories | ForEach-Object { Get-PathInventoryItem -Path $_ -TypeHint 'Directory' })
 		RuleFileCount      = @($ruleFiles).Count
-		RuleFiles          = @($ruleFiles)
 		RulesInUse         = @($ruleFiles).Count -gt 0
-		RawLocalConfig     = $localConfig
-		RawPolicyConfig    = $policyConfig
 	}
 }
 
@@ -1042,7 +1034,6 @@ function Get-OneDrivePolicyState {
 	}
 
 	[PSCustomObject]@{
-		PolicyLocations             = $policies
 		PolicyDetected              = @($policies).Count -gt 0
 		KFMSilentOptInTenantId      = if ($null -eq $effectivePolicy) { $null } else { Get-OptionalPropertyValue -Object $effectivePolicy -PropertyName 'KFMSilentOptIn' }
 		KFMSilentOptInWithNotify    = if ($null -eq $effectivePolicy) { $null } else { Get-OptionalPropertyValue -Object $effectivePolicy -PropertyName 'KFMSilentOptInWithNotification' }
@@ -1396,8 +1387,6 @@ function Get-TeamsMediaOptimizationDiscovery {
 		ClassicTeamsInstalled          = $classicTeamsInstalled
 		NewTeamsMsixPresent            = $newTeamsMsixPresent
 		AvOptimizationDisabledByPolicy = $avOptimizationDisabledByPolicy
-		RdPolicyConfig                 = $rdPolicyConfig
-		ClassicTeamsVdiConfig          = $classicTeamsVdiConfig
 	}
 }
 
@@ -1530,7 +1519,6 @@ function Get-UniversalPrintDiscovery {
 		ConnectorInstalled          = $null -ne $connectorService
 		ConnectorServiceStatus      = if ($null -eq $connectorService) { 'NotInstalled' } else { [string]$connectorService.Status }
 		ConnectorConfigDetected     = $null -ne $connectorConfig
-		ConnectorConfig             = $connectorConfig
 		CloudPrinterCount           = @($upPrinters).Count
 		CloudPrinters               = @($upPrinters)
 		UpMonitorPortCount          = @($upMonitorPorts).Count
@@ -2255,7 +2243,8 @@ try {
 	$teamsMediaOptimizationDiscovery = Get-TeamsMediaOptimizationDiscovery
 	$rdpRedirectionDiscovery = Get-RdpRedirectionDiscovery
 	$rdpShortpathDiscovery   = Get-RdpShortpathDiscovery
-	$adDependencyDiscovery   = Get-ActiveDirectoryDependencyDiscovery
+	# $adDependencyDiscovery   = Get-ActiveDirectoryDependencyDiscovery  # TEMP: disabled to isolate output size issue
+	$adDependencyDiscovery   = $null
 	$resolvedOutputDirectory = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path $PSScriptRoot 'vm-discovery' } else { [System.IO.Path]::GetFullPath($OutputDirectory) }
 	$resolvedOutputPath = New-ExportFilePath -Directory $resolvedOutputDirectory -CustomerCode $customerCode -Hostname $machineDetails.Hostname
 	$outputDirectory = Split-Path -Path $resolvedOutputPath -Parent
