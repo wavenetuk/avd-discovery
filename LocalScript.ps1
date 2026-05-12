@@ -547,6 +547,7 @@ function Get-OutlookCachedModeDiscovery {
 
 	[PSCustomObject]@{
 		EffectiveState          = $effectiveState
+		Note                    = if ($script:IsSystemAccountMode) { 'Per-user Outlook cached mode registry settings skipped — script is running as a system/machine account. Run LocalScript.ps1 interactively on the host to collect user-specific data.' } else { $null }
 		PolicyConfigured        = @($machinePolicySettings).Count -gt 0
 		PolicyEnableValue       = $policyEnableValue
 		MachinePolicySettings   = @($machinePolicySettings)
@@ -1076,6 +1077,7 @@ function Get-OneDriveAndFolderRedirectionDiscovery {
 
 	[PSCustomObject]@{
 		OneDrivePolicies              = Get-OneDrivePolicyState
+		Note                          = if ($script:IsSystemAccountMode) { 'Per-user shell folder, folder redirection, and mapped drive data skipped — script is running as a system/machine account. Run LocalScript.ps1 interactively on the host to collect user-specific data.' } else { $null }
 		LoadedUserCount               = @($loadedUsers).Count
 		UsersWithKnownFolderMove      = @($userStates | Where-Object { $_.LikelyOneDriveKnownFolderMove }).Count
 		UsersWithFolderRedirection    = @($userStates | Where-Object { $_.LikelyFolderRedirection }).Count
@@ -1759,6 +1761,7 @@ function Get-GroupPolicyDiscovery {
 
 	[PSCustomObject]@{
 		Succeeded        = $succeeded
+		Note             = if ($script:IsSystemAccountMode -and $succeeded) { 'Report contains computer policy only (no user RSoP) — script is running as a system/machine account. Run LocalScript.ps1 interactively on the host to include user Group Policy.' } else { $null }
 		HtmlReportPath   = if ($succeeded) { $OutputPath } else { $null }
 		Error            = $errorMessage
 	}
