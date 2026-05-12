@@ -1598,12 +1598,14 @@ function Get-ActiveDirectoryDependencyDiscovery {
 			if ([string]::IsNullOrEmpty($userId)) { return }
 			if ($userId -notmatch '\\') { return }
 			if ($userId -match '^(SYSTEM$|S-1-5-18$|LOCAL SERVICE$|NETWORK SERVICE$|BUILTIN\\|NT AUTHORITY\\|NT SERVICE\\|S-1-5-)') { return }
+			$runLevel  = $null; try { $runLevel  = [string]$principal.RunLevel } catch { }
+			$taskState = $null; try { $taskState = [string]$_.State        } catch { }
 			[PSCustomObject]@{
 				TaskPath = [string]$_.TaskPath
 				TaskName = [string]$_.TaskName
 				Account  = $userId
-				RunLevel = try { [string]$principal.RunLevel } catch { $null }
-				State    = try { [string]$_.State } catch { $null }
+				RunLevel = $runLevel
+				State    = $taskState
 			}
 		})
 	}
