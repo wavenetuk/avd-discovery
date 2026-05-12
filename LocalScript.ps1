@@ -467,7 +467,11 @@ function Get-LapsDiscovery {
 	$windowsLapsConfigured = $null -ne $windowsLapsPolicy -or $null -ne $windowsLapsPolicyManager
 	$legacyLapsConfigured = $null -ne $legacyLapsPolicy -or (Test-Path -Path $legacyLapsDllPath)
 	$legacyEnabled = if ($null -eq $legacyLapsPolicy) { $false } else { [int](Get-OptionalPropertyValue -Object $legacyLapsPolicy -PropertyName 'AdmPwdEnabled') -eq 1 }
-	$windowsBackupDirectory = if ($null -eq $windowsLapsPolicy) { Get-OptionalPropertyValue -Object $windowsLapsPolicyManager -PropertyName 'BackupDirectory' } else { Get-OptionalPropertyValue -Object $windowsLapsPolicy -PropertyName 'BackupDirectory' }
+	$windowsBackupDirectory = if ($null -ne $windowsLapsPolicy) {
+		Get-OptionalPropertyValue -Object $windowsLapsPolicy -PropertyName 'BackupDirectory'
+	} elseif ($null -ne $windowsLapsPolicyManager) {
+		Get-OptionalPropertyValue -Object $windowsLapsPolicyManager -PropertyName 'BackupDirectory'
+	} else { $null }
 
 	[PSCustomObject]@{
 		InUse                    = $windowsLapsConfigured -or $legacyEnabled
@@ -2359,6 +2363,7 @@ try {
 	}
 }
 catch {
-	Write-Error "Failed to discover applications or write JSON output. $($_.Exception.Message)"
+	$errLocation = if ($_.InvocationInfo) { " [line $($_.InvocationInfo.ScriptLineNumber)]" } else { '' }
+	Write-Error "Failed to discover applications or write JSON output.${errLocation} $($_.Exception.Message)"
 	exit 1
 }
