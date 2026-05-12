@@ -126,6 +126,12 @@ and the additional collection time is not wanted, or when licence data is not re
 for the current engagement. When skipped, LicenseSummaryStatus is set to 'Skipped'
 and all related fields are empty in the export.
 
+.PARAMETER NoGpresult
+When specified alongside -RunLocalDiscovery, passes -NoGpresult to LocalScript.ps1
+so that the gpresult HTML report is not generated on the session host. Useful when
+Group Policy data is not required or when gpresult is known to fail in the target
+environment.
+
 .PARAMETER GitHubBranch
 The branch name used when downloading LocalScript.ps1 and appExclusions.config.json
 from the GitHub repository (https://github.com/wavenetuk/avd-discovery) during
@@ -182,7 +188,10 @@ param(
 	[string]$GitHubBranch = 'main',
 
 	[Parameter(Mandatory = $false)]
-	[switch]$SkipLicenceCheck
+	[switch]$SkipLicenceCheck,
+
+	[Parameter(Mandatory = $false)]
+	[switch]$NoGpresult
 )
 
 Set-StrictMode -Version Latest
@@ -2457,7 +2466,7 @@ function Invoke-HostPoolLocalDiscovery {
 		'    New-Item -ItemType Directory -Path $outDir -Force | Out-Null',
 		'    Invoke-WebRequest -Uri $scriptUrl -OutFile $scrPath -UseBasicParsing',
 		'    Invoke-WebRequest -Uri $configUrl -OutFile $cfgPath -UseBasicParsing',
-		'    & $scrPath -CustomerAbbreviation $cCode -OutputDirectory $outDir -PrimaryApplicationsOnly -ErrorAction Stop *>&1 | Out-Null',
+		("    & `$scrPath -CustomerAbbreviation `$cCode -OutputDirectory `$outDir -PrimaryApplicationsOnly$(if ($NoGpresult.IsPresent) { ' -NoGpresult' }) -ErrorAction Stop *>&1 | Out-Null"),
 		'    $jf = Get-ChildItem -Path $outDir -Filter "*.json" -File | Select-Object -First 1',
 		'    if (-not $jf) { throw "No JSON output produced by LocalScript.ps1" }',
 		'    $jb  = [System.IO.File]::ReadAllBytes($jf.FullName)',
