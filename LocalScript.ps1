@@ -2038,6 +2038,8 @@ function Get-RdpShortpathDiscovery {
 			$shortpathEventCount131 = @($events | Where-Object { $_.Id -eq 131 }).Count
 			$shortpathEventCount70  = @($events | Where-Object { $_.Id -eq 70 }).Count
 			$shortpathLastEventTime = ($events | Sort-Object TimeCreated -Descending | Select-Object -First 1).TimeCreated.ToString('s')
+		}
+	}
 	catch { }
 
 	# --- AVD host agent — carries the STUN/TURN client needed for public Shortpath ---
