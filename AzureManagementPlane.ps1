@@ -2460,8 +2460,6 @@ function Invoke-HostPoolLocalDiscovery {
 		'    & $scrPath -CustomerAbbreviation $cCode -OutputDirectory $outDir -NoGpresult -PrimaryApplicationsOnly -ErrorAction Stop *>&1 | Out-Null',
 		'    $jf = Get-ChildItem -Path $outDir -Filter "*.json" -File | Select-Object -First 1',
 		'    if (-not $jf) { throw "No JSON output produced by LocalScript.ps1" }',
-		'    $jsonObj = Get-Content -Path $jf.FullName -Raw | ConvertFrom-Json',
-		'    $sectionSizes = ($jsonObj.PSObject.Properties | ForEach-Object { $v = $_.Value | ConvertTo-Json -Depth 10 -Compress; "{0}={1}" -f $_.Name,[Math]::Round($v.Length/1KB,1) }) -join ","',
 		'    $jb  = [System.IO.File]::ReadAllBytes($jf.FullName)',
 		'    $cms = [System.IO.MemoryStream]::new()',
 		'    $cgz = [System.IO.Compression.GZipStream]::new($cms, [System.IO.Compression.CompressionMode]::Compress)',
@@ -2470,7 +2468,7 @@ function Invoke-HostPoolLocalDiscovery {
 		'    $b64     = [Convert]::ToBase64String($cms.ToArray())',
 		'    $stgPath = Join-Path ([System.IO.Path]::GetTempPath()) ("avd-stage-$id.b64")',
 		'    [System.IO.File]::WriteAllText($stgPath, $b64, [System.Text.Encoding]::ASCII)',
-		'    Write-Output "##AVD_FILE##$stgPath##SIZE##$($b64.Length)##JSON##$($jb.Length)##SECTIONS##$sectionSizes##"',
+		'    Write-Output "##AVD_FILE##$stgPath##SIZE##$($b64.Length)##JSON##$($jb.Length)##"',
 		'} catch {',
 		'    $errMsg = ($_.Exception.Message -replace "[\r\n]+", " ").Trim()',
 		'    Write-Output "##AVD_LOCAL_DISCOVERY_ERROR##$errMsg"',
@@ -2517,10 +2515,6 @@ function Invoke-HostPoolLocalDiscovery {
 		$rawJsonSize  = " (raw JSON: $([Math]::Round($rawJsonBytes / 1KB, 1)) KB)"
 	}
 	Write-Host "    [LocalDiscovery] Staging file written: $stagingPath ($fileSize chars)$rawJsonSize"
-	if ($stdout -match '##SECTIONS##(.+?)##') {
-		$sectionData = $Matches[1]
-		Write-Host "    [LocalDiscovery] Section sizes (KB): $sectionData"
-	}
 
 	# Read the staging file back in chunks, then delete it regardless of success or failure.
 	$b64Payload = $null
