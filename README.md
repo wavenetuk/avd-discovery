@@ -396,3 +396,158 @@ For `DiagnosticsStatus: OK` and populated usage metrics, each host pool's Diagno
 | `Error` (`WVDErrors`) | Error summary, Shortpath error count |
 | `Checkpoint` (`WVDCheckpoints`) | Shortpath upgrade event count |
 | `HostRegistration` (`WVDHostRegistrations`) | Host registration event count per session host |
+
+---
+
+## Feature Testing Status
+
+> **Note:** This toolset is under active development. Features marked 🔴 have not yet been validated against a live environment and may contain bugs or incomplete logic. Do not rely on their output until they are marked 🟢.
+
+🟢 = Tested against a live environment &nbsp;&nbsp; 🔴 = Not yet tested
+
+### AzureManagementPlane.ps1
+
+#### Infrastructure Collection
+| Feature | Status |
+|---|---|
+| Host pool enumeration (type, load balancer, max session limit) | 🟢 |
+| Session host count and VM SKU(s) | 🟢 |
+| Domain join type and domain name | 🟢 |
+| VM extensions | 🟢 |
+| OS image (marketplace / custom / Shared Image Gallery) | 🟢 |
+| OS disk size and storage SKU | 🟢 |
+| Network info (VNet, subnet, DNS, NSG, UDR) | 🟢 |
+| Scaling plan name and schedule count | 🔴 |
+
+#### Reservations
+| Feature | Status |
+|---|---|
+| Reserved VM Instance matching by SKU and region | 🔴 |
+
+#### Backup
+| Feature | Status |
+|---|---|
+| Azure Backup detection for Personal pool VMs | 🔴 |
+
+#### Access & Authorisation
+| Feature | Status |
+|---|---|
+| App group and workspace names | 🟢 |
+| Role assignments (Entra ID groups and direct users) | 🟢 |
+| Transitive group membership resolution via Microsoft Graph | 🟢 |
+| Authorised user count | 🟢 |
+
+#### Usage Metrics
+| Feature | Status |
+|---|---|
+| Daily average users | 🟢 |
+| Peak concurrent sessions | 🟢 |
+| Weekend exclusion (`-ExcludeWeekends`) | 🟢 |
+| Peak hours filter (`-PeakHoursOnly`) | 🟢 |
+
+#### Performance Metrics
+| Feature | Status |
+|---|---|
+| Average, P95, P99 CPU % | 🟢 |
+| Average, P95, P99 memory used % | 🟢 |
+
+#### Diagnostic Insights
+| Feature | Status |
+|---|---|
+| Top 20 error types from `WVDErrors` | 🟢 |
+| Failed connection count | 🟢 |
+| Transport type breakdown (Shortpath / TURN / Websocket) | 🟢 |
+| Shortpath upgrade events | 🟢 |
+| Host registration events per session host | 🔴 |
+
+#### Licence Assignments
+| Feature | Status |
+|---|---|
+| Assigned licence SKUs for AVD-relevant products | 🟢 |
+| Unlicensed user detection | 🟢 |
+| `-SkipLicenceCheck` | 🟢 |
+
+#### `-RunLocalDiscovery`
+| Feature | Status |
+|---|---|
+| Finds first running session host in each pool | 🟢 |
+| Downloads and executes `LocalScript.ps1` via VM Run Command | 🟢 |
+| Returns output and saves to `vm-discovery/` | 🟢 |
+| `-GitHubBranch` targeting | 🔴 |
+
+---
+
+### LocalScript.ps1
+
+#### Machine Identity
+| Feature | Status |
+|---|---|
+| Hostname, domain membership, collection timestamp | 🟢 |
+| Join state (AD / Azure AD / Hybrid / Workgroup) | 🟢 |
+
+#### Applications
+| Feature | Status |
+|---|---|
+| Machine-wide and per-user installed applications | 🟢 |
+| Default system/update entry filtering | 🟢 |
+| `-PrimaryApplicationsOnly` stricter filter | 🟢 |
+
+#### FSLogix
+| Feature | Status |
+|---|---|
+| Installation and service state | 🔴 |
+| Profile container enabled state and VHD locations | 🔴 |
+| Office container state and paths | 🔴 |
+| Container size, policy settings, exclusion list | 🔴 |
+| Profile container sizes on disk | 🔴 |
+| App Masking configuration | 🔴 |
+| Redirections XML detection | 🔴 |
+
+#### OneDrive Known Folder Move
+| Feature | Status |
+|---|---|
+| KFM policy detection | 🟢 |
+
+#### Antivirus
+| Feature | Status |
+|---|---|
+| Security Center product detection | 🟢 |
+| Windows Defender status | 🟢 |
+| Third-party AV detection via application name matching | 🟢 |
+
+#### RDP Shortpath
+| Feature | Status |
+|---|---|
+| Managed network Shortpath enabled state and UDP port | 🟢 |
+| Public network Shortpath (ICE) enabled state | 🟢 |
+| UDP listener active state | 🟢 |
+| Recent Shortpath event detection (Event IDs 131 / 70) | 🔴 |
+| AVD agent service state and version | 🔴 |
+
+#### RDP Redirection Settings
+| Feature | Status |
+|---|---|
+| Clipboard, drive, printer, COM, LPT redirection | 🟢 |
+| Smart card, audio, video, USB, PnP redirection | 🟢 |
+| NLA, security layer, encryption level, colour depth | 🟢 |
+| Session time limits (idle, disconnect, connection) | 🟢 |
+
+#### Other Host Configuration
+| Feature | Status |
+|---|---|
+| LAPS detection (Windows LAPS and legacy LAPS) | 🟢 |
+| Intune enrollment state and IME version | 🟢 |
+| Teams media optimisation (WebRTC Redirector, New Teams) | 🟢 |
+| Language packs and system locale | 🟢 |
+| Printers | 🟢 |
+| Time source (NTP / W32tm) | 🟢 |
+| Universal Print connector | 🔴 |
+| Default file associations (DISM policy) | 🔴 |
+| Outlook cached mode policy | 🔴 |
+| AVD network connectivity tests | 🟢 |
+
+#### Group Policy Report
+| Feature | Status |
+|---|---|
+| `gpresult /h` HTML export | 🔴 |
+| `-NoGpresult` skip flag | 🟢 |
