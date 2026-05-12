@@ -475,6 +475,9 @@ function Get-LapsDiscovery {
 		LegacyLapsConfigured     = $legacyLapsConfigured
 		BackupDirectory          = $windowsBackupDirectory
 		LegacyLapsDllPresent     = Test-Path -Path $legacyLapsDllPath
+		WindowsLapsPolicy        = $windowsLapsPolicy
+		WindowsLapsPolicyManager = $windowsLapsPolicyManager
+		LegacyLapsPolicy         = $legacyLapsPolicy
 	}
 }
 
@@ -492,6 +495,7 @@ function Get-OutlookCachedModeDiscovery {
 			Enable        = Get-OptionalPropertyValue -Object $values -PropertyName 'Enable'
 			SyncWindowSetting = Get-OptionalPropertyValue -Object $values -PropertyName 'SyncWindowSetting'
 			SyncWindowSettingDays = Get-OptionalPropertyValue -Object $values -PropertyName 'SyncWindowSettingDays'
+			RawValues     = $values
 		}
 	}
 
@@ -508,6 +512,7 @@ function Get-OutlookCachedModeDiscovery {
 				Enable        = Get-OptionalPropertyValue -Object $values -PropertyName 'Enable'
 				SyncWindowSetting = Get-OptionalPropertyValue -Object $values -PropertyName 'SyncWindowSetting'
 				SyncWindowSettingDays = Get-OptionalPropertyValue -Object $values -PropertyName 'SyncWindowSettingDays'
+				RawValues     = $values
 			}
 		}
 
@@ -657,6 +662,9 @@ function Get-FSLogixAppMaskingDiscovery {
 		RuleDirectories    = @($ruleDirectories | ForEach-Object { Get-PathInventoryItem -Path $_ -TypeHint 'Directory' })
 		RuleFileCount      = @($ruleFiles).Count
 		RulesInUse         = @($ruleFiles).Count -gt 0
+		RawLocalConfig     = $localConfig
+		RawPolicyConfig    = $policyConfig
+		RuleFiles          = @($ruleFiles)
 	}
 }
 
@@ -1042,6 +1050,7 @@ function Get-OneDrivePolicyState {
 		SilentMoveDesktopEnabled    = if ($null -eq $effectivePolicy) { $null } else { Get-OptionalPropertyValue -Object $effectivePolicy -PropertyName 'KFMSilentOptInDesktop' }
 		SilentMoveDocumentsEnabled  = if ($null -eq $effectivePolicy) { $null } else { Get-OptionalPropertyValue -Object $effectivePolicy -PropertyName 'KFMSilentOptInDocuments' }
 		SilentMovePicturesEnabled   = if ($null -eq $effectivePolicy) { $null } else { Get-OptionalPropertyValue -Object $effectivePolicy -PropertyName 'KFMSilentOptInPictures' }
+		PolicyLocations             = @($policies)
 	}
 }
 
@@ -1067,6 +1076,10 @@ function Get-OneDriveAndFolderRedirectionDiscovery {
 		MappedDriveCount              = @($mappedDrives).Count
 		CurrentSessionMappedDriveCount = @($currentSessionMappedDrives).Count
 		CurrentSessionMappedDrives    = @($currentSessionMappedDrives)
+		LoadedUserFolderStates        = @($userStates)
+		LoadedUserMappedDriveStates   = @($userMappedDriveStates)
+		RedirectedFolders             = @($redirectedFolders)
+		MappedDrives                  = @($mappedDrives)
 	}
 }
 
@@ -1184,6 +1197,10 @@ function Get-FSLogixDiscovery {
 		ProfileContainerCount       = $totalProfileCount
 		ProfileContainerTotalBytes  = if ($null -eq $totalProfileBytes) { 0 } else { [int64]$totalProfileBytes }
 		ProfileContainerTotalGB     = ConvertTo-BytesToGigabytes -Bytes $totalProfileBytes
+		RawLocalConfig              = $localConfig
+		RawPolicyConfig             = $policyConfig
+		OfficeContainerLocalConfig  = $odfcLocalConfig
+		OfficeContainerPolicyConfig = $odfcPolicyConfig
 	}
 }
 
@@ -1318,6 +1335,7 @@ function Get-AvdConnectivityDiscovery {
 		RequiredReachableCount   = @($requiredPassed).Count
 		RequiredUnreachableCount = @($requiredFailed).Count
 		FailedEndpoints          = @($notableResults)
+		Results                  = @($results)
 	}
 }
 
@@ -1387,6 +1405,8 @@ function Get-TeamsMediaOptimizationDiscovery {
 		ClassicTeamsInstalled          = $classicTeamsInstalled
 		NewTeamsMsixPresent            = $newTeamsMsixPresent
 		AvOptimizationDisabledByPolicy = $avOptimizationDisabledByPolicy
+		RdPolicyConfig                 = $rdPolicyConfig
+		ClassicTeamsVdiConfig          = $classicTeamsVdiConfig
 	}
 }
 
@@ -1519,6 +1539,7 @@ function Get-UniversalPrintDiscovery {
 		ConnectorInstalled          = $null -ne $connectorService
 		ConnectorServiceStatus      = if ($null -eq $connectorService) { 'NotInstalled' } else { [string]$connectorService.Status }
 		ConnectorConfigDetected     = $null -ne $connectorConfig
+		ConnectorConfig             = $connectorConfig
 		CloudPrinterCount           = @($upPrinters).Count
 		CloudPrinters               = @($upPrinters)
 		UpMonitorPortCount          = @($upMonitorPorts).Count
@@ -1687,6 +1708,10 @@ function Get-ActiveDirectoryDependencyDiscovery {
 		DomainScheduledTaskCount = @($domainTasks).Count
 		DomainOdbcSourceCount    = @($odbcSources).Count
 		AdPortConnectionCount    = @($adConnections).Count
+		DomainServices           = @($domainServices)
+		DomainScheduledTasks     = @($domainTasks)
+		OdbcSources              = @($odbcSources)
+		AdPortConnections        = @($adConnections)
 	}
 }
 
@@ -1996,6 +2021,7 @@ function Get-RdpShortpathDiscovery {
 	$shortpathEventCount131  = 0
 	$shortpathEventCount70   = 0
 	$shortpathLastEventTime  = $null
+	$recentShortpathEvents   = @()
 
 	try {
 		$cutoff = (Get-Date).AddDays(-$shortpathEventQueryDays)
@@ -2008,6 +2034,9 @@ function Get-RdpShortpathDiscovery {
 			$shortpathEventCount131 = @($events | Where-Object { $_.Id -eq 131 }).Count
 			$shortpathEventCount70  = @($events | Where-Object { $_.Id -eq 70 }).Count
 			$shortpathLastEventTime = ($events | Sort-Object TimeCreated -Descending | Select-Object -First 1).TimeCreated.ToString('s')
+			$recentShortpathEvents  = @($events | Sort-Object TimeCreated -Descending | ForEach-Object {
+				[PSCustomObject]@{ Id = $_.Id; TimeCreated = $_.TimeCreated.ToString('s'); Message = $_.Message }
+			})
 		}
 	}
 	catch { }
@@ -2046,6 +2075,7 @@ function Get-RdpShortpathDiscovery {
 		ShortpathEvent131Count       = $shortpathEventCount131
 		ShortpathEvent70Count        = $shortpathEventCount70
 		ShortpathLastEventTime       = $shortpathLastEventTime
+		RecentShortpathEvents        = $recentShortpathEvents
 		AvdAgentService              = if ($null -eq $agentService) { $null } else { [string]$agentService.Status }
 		AvdAgentVersion              = $agentVersion
 	}
@@ -2170,6 +2200,8 @@ function Get-RdpRedirectionDiscovery {
 		MaxIdleTime                 = Format-Milliseconds -V $maxIdleTime
 		MaxDisconnectionTime        = Format-Milliseconds -V $maxDisconTime
 		MaxConnectionTime           = Format-Milliseconds -V $maxConnTime
+		GroupPolicyRawValues        = $gpVals
+		LocalWinStationRawValues    = $winStaVals
 	}
 }
 
