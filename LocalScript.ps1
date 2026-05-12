@@ -2149,7 +2149,10 @@ try {
 		Applications         = $installedApps
 	}
 
-	$exportObject | ConvertTo-Json -Depth 10 | Set-Content -Path $resolvedOutputPath -Encoding UTF8
+	$exportObject | ConvertTo-Json -Depth 10 |
+		ForEach-Object { $_ -replace '(?m)^(    )+', { '  ' * ($_.Value.Length / 4) } } |
+		ForEach-Object { $_ -replace ':  ', ': ' } |
+		Set-Content -Path $resolvedOutputPath -Encoding UTF8
 
 	Write-Host "Exported $(@($installedApps).Count) applications and host profile data to: $resolvedOutputPath"
 	if ($null -ne $groupPolicyDiscovery -and $groupPolicyDiscovery.Succeeded) {
