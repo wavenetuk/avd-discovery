@@ -499,8 +499,8 @@ function Get-OutlookCachedModeDiscovery {
 		}
 	}
 
-	# Per-user cached mode settings for each loaded user hive
-	$loadedUsers = Get-LoadedUserProfiles
+	# Per-user cached mode settings — skip when running as SYSTEM/machine account (no user hive loaded)
+	$loadedUsers = if ($script:IsSystemAccountMode) { @() } else { Get-LoadedUserProfiles }
 	$userSettings = foreach ($user in $loadedUsers) {
 		$userVersionSettings = foreach ($version in $officeVersions) {
 			$userCachedModePath = "Registry::HKEY_USERS\$($user.Sid)\Software\Microsoft\Office\$version\Outlook\Cached Mode"
@@ -656,8 +656,15 @@ function Get-FSLogixAppMaskingDiscovery {
 			}
 	}
 
+	# HKLM:\SOFTWARE\FSLogix\Apps is written by the installer with InstallPath/InstallVersion.
+	# Those keys are not App Masking configuration — exclude them when deciding if App Masking
+	# has been deliberately configured.
+	$installerOnlyKeys = @('InstallPath', 'InstallVersion')
+	$localConfigHasMaskingSettings = $null -ne $localConfig -and
+		@($localConfig.PSObject.Properties | Where-Object { $_.Name -notin $installerOnlyKeys }).Count -gt 0
+
 	[PSCustomObject]@{
-		Configured         = ($null -ne $localConfig) -or ($null -ne $policyConfig)
+		Configured         = $localConfigHasMaskingSettings -or ($null -ne $policyConfig)
 		EffectiveEnabled   = if ($null -eq $effectiveConfig) { $null } else { Get-OptionalPropertyValue -Object $effectiveConfig -PropertyName 'Enabled' }
 		RuleDirectories    = @($ruleDirectories | ForEach-Object { Get-PathInventoryItem -Path $_ -TypeHint 'Directory' })
 		RuleFileCount      = @($ruleFiles).Count
@@ -1002,7 +1009,7 @@ function Get-UserShellFolderState {
 		Get-FolderState -FolderName 'Favorites' -RawPath (Get-OptionalPropertyValue -Object $userShellFolders -PropertyName 'Favorites') -ProfilePath $ProfilePath -DefaultRelativePath 'Favorites'
 		Get-FolderState -FolderName 'AppDataRoaming' -RawPath (Get-OptionalPropertyValue -Object $userShellFolders -PropertyName 'AppData') -ProfilePath $ProfilePath -DefaultRelativePath 'AppData\Roaming'
 	)
-	$redirectedFolders = @($folders | Where-Object { $_.IsNetworkRedirected -or ($_.IsCustomRedirected -and -not $_.IsOneDrivePath) })
+	$redirectedFolders = @($folders | Where-Object { $_.IsNetworkRedirected })
 
 	[PSCustomObject]@{
 		Sid                           = $Sid
@@ -1055,7 +1062,8 @@ function Get-OneDrivePolicyState {
 }
 
 function Get-OneDriveAndFolderRedirectionDiscovery {
-	$loadedUsers = Get-LoadedUserProfiles
+	# Skip per-user shell folder and mapped drive checks when running as SYSTEM/machine account
+	$loadedUsers = if ($script:IsSystemAccountMode) { @() } else { Get-LoadedUserProfiles }
 	$userStates = foreach ($user in $loadedUsers) {
 		Get-UserShellFolderState -Sid $user.Sid -AccountName $user.AccountName -ProfilePath $user.ProfilePath
 	}
@@ -1726,7 +1734,9 @@ function Get-GroupPolicyDiscovery {
 	$tempFile = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ([System.Guid]::NewGuid().ToString('N') + '.html')
 
 	try {
-		$gpresultOutput = & gpresult.exe /h $tempFile /f 2>&1
+		$gpresultArgs = @('/h', $tempFile, '/f')
+		if ($script:IsSystemAccountMode) { $gpresultArgs += @('/scope', 'computer') }
+		$gpresultOutput = & gpresult.exe @gpresultArgs 2>&1
 		$exitCode = $LASTEXITCODE
 
 		if (Test-Path -Path $tempFile) {
@@ -2026,17 +2036,27 @@ function Get-RdpShortpathDiscovery {
 	try {
 		$cutoff = (Get-Date).AddDays(-$shortpathEventQueryDays)
 		$logName = 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational'
+		# Event 131: shortpath only when the message says UDP (TCP connections are normal RDP, not shortpath)
+		# Event 70:  shortpath only when the message mentions UDP transport
 		$events = @(Get-WinEvent -LogName $logName -ErrorAction SilentlyContinue |
-			Where-Object { $_.Id -in @(131, 70) -and $_.TimeCreated -ge $cutoff })
+			Where-Object { $_.Id -in @(131, 70) -and $_.TimeCreated -ge $cutoff -and $_.Message -match '(?i)UDP' })
 
 		if (@($events).Count -gt 0) {
 			$shortpathUsedRecently  = $true
 			$shortpathEventCount131 = @($events | Where-Object { $_.Id -eq 131 }).Count
 			$shortpathEventCount70  = @($events | Where-Object { $_.Id -eq 70 }).Count
 			$shortpathLastEventTime = ($events | Sort-Object TimeCreated -Descending | Select-Object -First 1).TimeCreated.ToString('s')
-			$recentShortpathEvents  = @($events | Sort-Object TimeCreated -Descending | ForEach-Object {
-				[PSCustomObject]@{ Id = $_.Id; TimeCreated = $_.TimeCreated.ToString('s'); Message = $_.Message }
-			})
+			$recentShortpathEvents  = @($events |
+				Group-Object -Property Id, Message |
+				ForEach-Object {
+					$latest = ($_.Group | Sort-Object TimeCreated -Descending | Select-Object -First 1)
+					[PSCustomObject]@{
+						Id          = $latest.Id
+						Count       = $_.Count
+						LastSeen    = $latest.TimeCreated.ToString('s')
+						Message     = $latest.Message
+					}
+				} | Sort-Object LastSeen -Descending)
 		}
 	}
 	catch { }
@@ -2256,6 +2276,12 @@ function New-ExportFilePath {
 }
 
 try {
+	# Detect whether we are running as SYSTEM or a machine account (e.g. via Azure Run Command).
+	# In that context, per-user checks (HKCU/HKEY_USERS, gpresult user RSoP) are meaningless.
+	$currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+	$script:IsSystemAccountMode = $currentIdentity.IsSystem -or $currentIdentity.Name -match '\\\S+\$$'
+	$script:RunningAsAccount = Get-NormalizedText -Value $currentIdentity.Name
+
 	$script:PrimaryApplicationConfig = Get-PrimaryApplicationConfig -ConfigPath (Get-PrimaryApplicationConfigPath)
 	$customerCode = Get-CustomerAbbreviation -Value $CustomerAbbreviation
 	$installedApps = Get-InstalledApplications -PrimaryApplicationsOnlyMode $PrimaryApplicationsOnly.IsPresent
@@ -2292,6 +2318,8 @@ try {
 	$exportObject = [PSCustomObject]@{
 		CustomerAbbreviation = $customerCode
 		CollectedAt          = (Get-Date).ToString('s')
+		CollectionMode       = if ($script:IsSystemAccountMode) { 'SystemAccount' } else { 'Interactive' }
+		RunningAsAccount     = $script:RunningAsAccount
 		Machine              = $machineDetails
 		DiscoveryType        = 'LocalAvdHost'
 		JoinState            = $joinDiscovery
