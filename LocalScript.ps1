@@ -2286,7 +2286,7 @@ try {
 	}
 
 	$exportObject | ConvertTo-Json -Depth 10 |
-		ForEach-Object { $_ -replace '(?m)^(    )+', { '  ' * ($_.Value.Length / 4) } } |
+		ForEach-Object { [regex]::Replace($_, '(?m)^(    )+', { param($m) '  ' * ($m.Value.Length / 4) }) } |
 		ForEach-Object { $_ -replace ':  ', ': ' } |
 		Set-Content -Path $resolvedOutputPath -Encoding UTF8
 
