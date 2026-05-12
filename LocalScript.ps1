@@ -1072,14 +1072,10 @@ function Get-OneDriveAndFolderRedirectionDiscovery {
 		UsersWithKnownFolderMove      = @($userStates | Where-Object { $_.LikelyOneDriveKnownFolderMove }).Count
 		UsersWithFolderRedirection    = @($userStates | Where-Object { $_.LikelyFolderRedirection }).Count
 		RedirectedFolderCount         = @($redirectedFolders).Count
-		RedirectedFolders             = @($redirectedFolders)
 		UsersWithMappedDrives         = @($userMappedDriveStates | Where-Object { $_.MappedDrivesPresent }).Count
 		MappedDriveCount              = @($mappedDrives).Count
-		MappedDrives                  = @($mappedDrives)
 		CurrentSessionMappedDriveCount = @($currentSessionMappedDrives).Count
 		CurrentSessionMappedDrives    = @($currentSessionMappedDrives)
-		LoadedUserMappedDriveStates   = @($userMappedDriveStates)
-		LoadedUserFolderStates        = @($userStates)
 	}
 }
 
@@ -1130,16 +1126,6 @@ function Get-FSLogixProfileFiles {
 			TotalSizeBytes          = if ($null -eq $totalBytes) { 0 } else { [int64]$totalBytes }
 			TotalSizeGB             = ConvertTo-BytesToGigabytes -Bytes $totalBytes
 			ScanError               = $errorMessage
-			ProfileContainers       = @($deduplicatedFiles | Sort-Object -Property Length -Descending | ForEach-Object {
-				[PSCustomObject]@{
-					Name          = $_.Name
-					FullName      = $_.FullName
-					Extension     = $_.Extension
-					SizeBytes     = [int64]$_.Length
-					SizeGB        = ConvertTo-BytesToGigabytes -Bytes $_.Length
-					LastWriteTime = $_.LastWriteTime.ToString('s')
-				}
-			})
 		}
 	}
 
