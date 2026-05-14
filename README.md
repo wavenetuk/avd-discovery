@@ -8,14 +8,14 @@ A pair of PowerShell scripts for assessing Azure Virtual Desktop environments du
 
 | Script | Where It Runs | Output |
 |---|---|---|
-| `AzureManagementPlane.ps1` | Your local machine | `avd-metrics/<customer>-avd-metrics-<timestamp>.json` |
-| `LocalScript.ps1` | On an AVD session host | `vm-discovery/<customer>-<hostname>-avd-discovery-<timestamp>.json` |
+| `scripts/Invoke-AvdMetricsCollection.ps1` | Your local machine | `output/avd-metrics/<customer>-avd-metrics-<timestamp>.json` |
+| `scripts/Invoke-AvdSessionHostAudit.ps1` | On an AVD session host | `output/vm-discovery/<customer>-<hostname>-avd-discovery-<timestamp>.json` |
 
-`AzureManagementPlane.ps1` can optionally invoke `LocalScript.ps1` automatically on a running session host via Azure VM Run Command (`-RunLocalDiscovery`), eliminating the need to run it separately.
+`Invoke-AvdMetricsCollection.ps1` can optionally invoke `Invoke-AvdSessionHostAudit.ps1` automatically on a running session host via Azure VM Run Command (`-RunLocalDiscovery`), eliminating the need to run it separately.
 
 ---
 
-## AzureManagementPlane.ps1
+## Invoke-AvdMetricsCollection.ps1
 
 Enumerates all AVD host pools across one or more Azure subscriptions and collects management-plane metrics and infrastructure detail for each pool.
 
@@ -30,6 +30,7 @@ Enumerates all AVD host pools across one or more Azure subscriptions and collect
 - OS disk size (GB) and storage SKU
 - VNet, subnet, address prefixes, custom DNS servers, NSG, and UDR names
 - Scaling plan name and schedule count (if configured)
+- Host pool RDP properties (`customRdpProperty`) — the AVD-enforced redirection settings sent to connecting clients, parsed into a structured object covering drive, clipboard, printer, smart card, audio, camera, USB, and location redirection
 
 #### Reservations
 - Whether any Azure Reserved VM Instances match the pool's VM SKU and region
@@ -75,11 +76,11 @@ Enumerates all AVD host pools across one or more Azure subscriptions and collect
 | `-PeakHoursOnly` | switch | off | Restrict metric averages to 09:00–18:00 local time only |
 | `-UtcOffsetHours` | int | `0` | UTC offset for peak hours window (e.g. `1` for BST) |
 | `-OutputDirectory` | string | script folder | Directory for the JSON export |
-| `-RunLocalDiscovery` | switch | off | Execute `LocalScript.ps1` on a running VM in each pool via Azure VM Run Command (downloads from GitHub) |
-| `-InlineLocalScript` | switch | off | Embed `LocalScript.ps1` and `appExclusions.config.json` directly into the Run Command payload instead of downloading from GitHub on the VM. Use when VMs lack outbound HTTPS to `raw.githubusercontent.com` (AV/firewall restrictions). Requires the files to be present alongside `AzureManagementPlane.ps1` |
+| `-RunLocalDiscovery` | switch | off | Execute `Invoke-AvdSessionHostAudit.ps1` on a running VM in each pool via Azure VM Run Command (downloads from GitHub) |
+| `-InlineLocalScript` | switch | off | Embed `Invoke-AvdSessionHostAudit.ps1` and `config/appExclusions.config.json` directly into the Run Command payload instead of downloading from GitHub on the VM. Use when VMs lack outbound HTTPS to `raw.githubusercontent.com` (AV/firewall restrictions). Requires the files to be present alongside `Invoke-AvdMetricsCollection.ps1` |
 | `-LocalDiscoveryTimeout` | int | `300` | Maximum seconds to wait for the on-VM script to complete when using `-RunLocalDiscovery`. Valid range: 60–3600 |
 | `-RunAsUser` | switch | off | Prompt for domain credentials before running local discovery and execute the Run Command as that user instead of SYSTEM. Shows a security warning before prompting. Useful when per-user checks (shell folders, mapped drives, Outlook settings) are needed |
-| `-GitHubBranch` | string | `main` | GitHub branch to download `LocalScript.ps1` and `appExclusions.config.json` from when using `-RunLocalDiscovery` |
+| `-GitHubBranch` | string | `main` | GitHub branch to download `Invoke-AvdSessionHostAudit.ps1` and `config/appExclusions.config.json` from when using `-RunLocalDiscovery` |
 | `-SkipLicenceCheck` | switch | off | Skip Microsoft Graph licence collection |
 
 ### Prerequisites
@@ -90,46 +91,46 @@ Enumerates all AVD host pools across one or more Azure subscriptions and collect
 - **For usage metrics**: Diagnostic Settings on each host pool forwarding `Connection`, `Error`, `Checkpoint`, and `HostRegistration` log categories to a Log Analytics workspace
 - **For licence data**: the authenticated account requires Microsoft Graph `User.Read.All` and `Group.Read.All` (or equivalent)
 - **For `-RunLocalDiscovery`**: session host VMs must have outbound HTTPS access to `raw.githubusercontent.com` so they can download the scripts at runtime (or use `-InlineLocalScript` to bypass this requirement)
-- **For `-RunAsUser`**: a domain account with the right to log on to the session host interactively; credentials are collected once before discovery begins and are never written to disk
+- **For `-RunAsUser`**: a low-privilege domain account with interactive logon rights on the session host; credentials are collected once before discovery begins, transmitted in plaintext in the ARM request body, and may appear in Azure ARM activity logs — see the [Run-As Mode](#run-as-mode--runasuser) section for full security implications
 
 ### Usage Examples
 
 ```powershell
 # Interactive — prompts for customer abbreviation, queries all subscriptions
-.\AzureManagementPlane.ps1
+.\scripts\Invoke-AvdMetricsCollection.ps1
 
 # Specific subscription, 14-day window, exclude weekends
-.\AzureManagementPlane.ps1 -CustomerAbbreviation contoso -SubscriptionId '00000000-0000-0000-0000-000000000000' -LookbackDays 14 -ExcludeWeekends
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -SubscriptionId '00000000-0000-0000-0000-000000000000' -LookbackDays 14 -ExcludeWeekends
 
 # Peak hours only (09:00–18:00 BST), weekdays only
-.\AzureManagementPlane.ps1 -CustomerAbbreviation contoso -PeakHoursOnly -ExcludeWeekends -UtcOffsetHours 1
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -PeakHoursOnly -ExcludeWeekends -UtcOffsetHours 1
 
 # Single host pool, skip licence check
-.\AzureManagementPlane.ps1 -CustomerAbbreviation contoso -HostPoolName hp-prod-avd-01 -SkipLicenceCheck
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -HostPoolName hp-prod-avd-01 -SkipLicenceCheck
 
-# Run LocalScript.ps1 automatically — fetches latest from GitHub main branch
-.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery
+# Run Invoke-AvdSessionHostAudit.ps1 automatically — fetches latest from GitHub main branch
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery
 
-# Run LocalScript.ps1 from a specific branch (e.g. for testing)
-.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -GitHubBranch feature/my-branch
+# Run Invoke-AvdSessionHostAudit.ps1 from a specific branch (e.g. for testing)
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -GitHubBranch feature/my-branch
 
-# Run LocalScript.ps1 with inline mode (no outbound GitHub access needed on VMs)
-.\AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -InlineLocalScript -NoGpresult
+# Run Invoke-AvdSessionHostAudit.ps1 with inline mode (no outbound GitHub access needed on VMs)
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -InlineLocalScript -NoGpresult
 # Extend the per-VM timeout to 10 minutes (default is 300s)
-.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -LocalDiscoveryTimeout 600
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -LocalDiscoveryTimeout 600
 
 # Run as a domain user to enable per-user checks (shell folders, mapped drives, Outlook)
-.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -RunAsUser
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -RunAsUser
 
 # Inline mode + run-as (blocked GitHub AND need per-user data)
-.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -InlineLocalScript -RunAsUser
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -InlineLocalScript -RunAsUser
 # Custom output directory
-.\AzureManagementPlane.ps1 -CustomerAbbreviation contoso -OutputDirectory C:\exports
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -OutputDirectory C:\exports
 ```
 
 ### Output File
 
-Written to `avd-metrics/` as `<customer>-avd-metrics-<yyyyMMdd-HHmmss>.json`.
+Written to `output/avd-metrics/` as `<customer>-avd-metrics-<yyyyMMdd-HHmmss>.json`.
 
 Top-level fields:
 
@@ -172,6 +173,19 @@ Each object in `HostPools` contains:
   "OsDiskSkus": ["Premium_LRS"],
   "NetworkInfo": [ ... ],
   "ScalingPlan": null,
+  "RdpProperties": {
+    "RawPropertyString": "drivestoredirect:s:;redirectclipboard:i:0;redirectprinters:i:0;audiomode:i:0;audiocapturemode:i:1",
+    "AllSettings": { "drivestoredirect": "", "redirectclipboard": 0, "redirectprinters": 0, "audiomode": 0, "audiocapturemode": 1 },
+    "DriveRedirection": { "Enabled": false, "Value": "" },
+    "ClipboardRedirection": { "Enabled": false, "RawValue": 0 },
+    "PrinterRedirection": { "Enabled": false, "RawValue": 0 },
+    "SmartCardRedirection": null,
+    "AudioPlayback": { "Display": "PlayOnClient", "RawValue": 0 },
+    "AudioCapture": { "Enabled": true, "RawValue": 1 },
+    "CameraRedirection": null,
+    "UsbRedirection": null,
+    "LocationRedirection": null
+  },
   "ReservationMatchStatus": "Match",
   "MatchedReservations": [ ... ],
   "BackupInfoStatus": "NotApplicable",
@@ -214,12 +228,12 @@ Each object in `HostPools` contains:
 
 ## How `-RunLocalDiscovery` Works
 
-When `-RunLocalDiscovery` is passed, `AzureManagementPlane.ps1` enumerates all powered-on session hosts in each pool, then attempts to run a bootstrap script on them in sequence via the **Azure VM Run Command v2** API until one succeeds. The bootstrap runs entirely on the VM and:
+When `-RunLocalDiscovery` is passed, `Invoke-AvdMetricsCollection.ps1` enumerates all powered-on session hosts in each pool, then attempts to run a bootstrap script on them in sequence via the **Azure VM Run Command v2** API until one succeeds. The bootstrap runs entirely on the VM and:
 
-1. Downloads `LocalScript.ps1` and `appExclusions.config.json` from the GitHub repository (`raw.githubusercontent.com/wavenetuk/avd-discovery/<branch>`) using `Invoke-WebRequest` — or decodes them from the embedded payload in inline mode
-2. Executes `LocalScript.ps1` in a temporary directory
+1. Downloads `Invoke-AvdSessionHostAudit.ps1` and `config/appExclusions.config.json` from the GitHub repository (`raw.githubusercontent.com/wavenetuk/avd-discovery/<branch>`) using `Invoke-WebRequest` — or decodes them from the embedded payload in inline mode
+2. Executes `Invoke-AvdSessionHostAudit.ps1` in a temporary directory
 3. GZip-compresses and base64-encodes the resulting JSON, writing it to a staging file on the VM
-4. Returns the staging file path via stdout; `AzureManagementPlane.ps1` reads it back in chunks, decodes the payload, and saves the JSON to the `vm-discovery/` folder
+4. Returns the staging file path via stdout; `Invoke-AvdMetricsCollection.ps1` reads it back in chunks, decodes the payload, and saves the JSON to the `output/vm-discovery/` folder
 
 The files are always fetched fresh from GitHub, so the VM always runs the latest committed version of the script. Use `-GitHubBranch` to target a different branch during testing.
 
@@ -246,7 +260,7 @@ This is the only write operation in the script and requires user consent each ti
 
 Every third polling cycle, the script queries the Run Command **instance view** directly and logs the current `executionState` (e.g. `Running`, `Pending`). If the state remains `Pending` with `provisioningState: Creating` for 90 or more seconds, the script concludes that the VM agent is not processing commands and aborts the attempt early — rather than waiting the full timeout.
 
-On the first stuck VM in a pool, a yellow advisory box is printed explaining likely causes (endpoint security blocking execution, the Azure wireserver being unreachable, or a stuck agent goal-state queue) and recommending that the user cancel and run `LocalScript.ps1` directly on the host via RDP, Azure Bastion, an RMM tool, or LogicMonitor.
+On the first stuck VM in a pool, a yellow advisory box is printed explaining likely causes (endpoint security blocking execution, the Azure wireserver being unreachable, or a stuck agent goal-state queue) and recommending that the user cancel and run `Invoke-AvdSessionHostAudit.ps1` directly on the host via RDP, Azure Bastion, an RMM tool, or LogicMonitor.
 
 ### Timeout Diagnostics
 
@@ -260,10 +274,10 @@ This information pinpoints whether the command was never delivered (stuck at `Pe
 
 ### Controlling the Execution Timeout (`-LocalDiscoveryTimeout`)
 
-By default `AzureManagementPlane.ps1` waits up to **300 seconds** for the on-VM script to finish. If your session hosts are slow to start, heavily loaded, or the discovery scope is large, you can raise this:
+By default `Invoke-AvdMetricsCollection.ps1` waits up to **300 seconds** for the on-VM script to finish. If your session hosts are slow to start, heavily loaded, or the discovery scope is large, you can raise this:
 
 ```powershell
-.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -LocalDiscoveryTimeout 600
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -LocalDiscoveryTimeout 600
 ```
 
 Valid range is 60–3600 seconds. The value is passed directly to the Azure Run Command `timeoutInSeconds` field as well as the local polling deadline, so both the VM-side execution limit and the client-side wait are extended together.
@@ -272,27 +286,34 @@ During polling, every third check also queries the Run Command **instance view**
 
 ### Run-As Mode (`-RunAsUser`)
 
-Azure VM Run Command normally executes as `NT AUTHORITY\SYSTEM`. This means per-user registry hives, shell folder redirections, mapped drives, and Outlook cached-mode settings are not visible to `LocalScript.ps1` — the output will be marked `"CollectionMode": "SystemAccount"` and those checks are skipped.
+Azure VM Run Command normally executes as `NT AUTHORITY\SYSTEM`. This means per-user registry hives, shell folder redirections, mapped drives, and Outlook cached-mode settings are not visible to `Invoke-AvdSessionHostAudit.ps1` — the output will be marked `"CollectionMode": "SystemAccount"` and those checks are skipped.
 
-Add `-RunAsUser` to run as a real domain account instead:
+Add `-RunAsUser` to run as a domain account instead:
 
 ```powershell
-.\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -RunAsUser
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -RunAsUser
 ```
 
-Before discovery begins you will see a prominent warning and be prompted for a username and password. Credentials are held in memory only for the duration of the run and are never written to disk. The script runs once per host pool, targeting a single powered-on session host, so you only need to enter credentials once per execution.
+Before discovery begins you will see a prominent warning and be prompted for a username and password. The script runs once per host pool, targeting a single powered-on session host, so you only need to enter credentials once per execution.
 
-> **Security note:** The account used needs the right to log on to the session host interactively. A read-only service account with interactive logon rights is preferred over a full admin account.
+> **⚠ Security implications — read before using:**
+>
+> - **Credentials are transmitted in plaintext.** The username and password are sent as plain text in the Azure ARM API request body. They are not encrypted beyond the HTTPS transport layer.
+> - **Temporarily stored in Azure.** The credentials are held inside the `runCommands` ARM resource for the duration of the run. The script deletes this resource on completion, but it exists in Azure for several minutes.
+> - **Username is visible in ARM activity logs; password is not.** Azure ARM activity logs record the response body returned by the API, not the request body sent to it. Since Azure never echoes `runAsPassword` back in its response, the password does not appear in standard activity logs. However, the username (`runAsUser`) is present in the logged response body and will be visible to anyone with `Reader` access on the subscription for up to 90 days. If your organisation exports activity logs to a Log Analytics workspace or storage account, the same applies to those copies.
+> - **ARM activity log entries cannot be deleted.** Azure platform activity logs are immutable — individual entries cannot be removed. The entries age out automatically after the configured retention period (90 days by default). If your organisation exports to Log Analytics or a storage account via a Diagnostic Setting, those copies can be purged separately (delete the relevant rows in Log Analytics, or delete the blob in the storage account).
+> - **Use a low-privilege domain account only.** The account must be able to log on to the session host interactively, but should have no other elevated rights. Do not use admin accounts, service accounts with broad permissions, or shared credentials.
+> - **Local accounts are not suitable.** The Azure VM Run Command `runAsUser` feature requires a domain account (format: `DOMAIN\user` or `user@domain.com`). Local administrator accounts should not be used — they are specifically the type of privileged account this feature warns against.
 
 ### Inline Mode (`-InlineLocalScript`)
 
 If VMs cannot reach `raw.githubusercontent.com` (blocked by antivirus, firewall, proxy, or network policy), add `-InlineLocalScript` to embed the script files directly in the Run Command payload:
 
 ```powershell
-.\AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -InlineLocalScript
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -InlineLocalScript
 ```
 
-In this mode, `LocalScript.ps1` and `appExclusions.config.json` are read from the local repository directory (alongside `AzureManagementPlane.ps1`), base64-encoded, and carried inside the wrapper script sent to the VM. On the VM, the embedded content is decoded to temp files before execution — no outbound internet access is required.
+In this mode, `Invoke-AvdSessionHostAudit.ps1` and `config/appExclusions.config.json` are read from the local repository directory (alongside `Invoke-AvdMetricsCollection.ps1`), base64-encoded, and carried inside the wrapper script sent to the VM. On the VM, the embedded content is decoded to temp files before execution — no outbound internet access is required.
 
 The combined payload (~98 KB) fits well within the Azure Run Command v2 limit of 256 KB.
 
@@ -310,18 +331,18 @@ When run interactively on a host as a real user account, all of the above checks
 - The session host must have outbound HTTPS access to `raw.githubusercontent.com` (unless `-InlineLocalScript` is used)
 - The calling account needs `Virtual Machine Contributor` or `Virtual Machine Run Command Contributor` on the session host VMs
 
-**System account mode:** Azure VM Run Command executes as `NT AUTHORITY\SYSTEM` (or the machine account `HOSTNAME$`). `LocalScript.ps1` automatically detects this context and adjusts its behaviour:
+**System account mode:** Azure VM Run Command executes as `NT AUTHORITY\SYSTEM` (or the machine account `HOSTNAME$`). `Invoke-AvdSessionHostAudit.ps1` automatically detects this context and adjusts its behaviour:
 
 ---
 
-Runs directly on an AVD session host (or via `-RunLocalDiscovery` in `AzureManagementPlane.ps1`) to collect on-VM configuration that is not visible from the Azure management plane.
+Runs directly on an AVD session host (or via `-RunLocalDiscovery` in `Invoke-AvdMetricsCollection.ps1`) to collect on-VM configuration that is not visible from the Azure management plane.
 
 ### What It Collects
 
 #### Installed Applications
 - All machine-wide and per-user installed applications from the Windows registry uninstall keys
 - Default filter removes hidden system components, child installer entries, and Windows Update records
-- `-PrimaryApplicationsOnly` applies a stricter filter (configurable in `appExclusions.config.json`) to suppress common runtimes, redistributables, helper components, add-ins, and support packages — leaving only primary business applications
+- `-PrimaryApplicationsOnly` applies a stricter filter (configurable in `config/appExclusions.config.json`) to suppress common runtimes, redistributables, helper components, add-ins, and support packages — leaving only primary business applications
 
 #### Machine Identity
 - Hostname, domain membership, and time of collection
@@ -389,7 +410,7 @@ For each of the following, reports the effective value, its source (Group Policy
 |---|---|---|---|
 | `-CustomerAbbreviation` | string | *(prompted)* | Short code used in the output filename |
 | `-OutputDirectory` | string | script folder | Directory for the JSON and HTML exports |
-| `-PrimaryApplicationsOnly` | switch | off | Apply stricter application filter (see `appExclusions.config.json`) |
+| `-PrimaryApplicationsOnly` | switch | off | Apply stricter application filter (see `config/appExclusions.config.json`) |
 | `-NoGpresult` | switch | off | Skip the `gpresult /h` HTML report |
 
 ### Prerequisites
@@ -397,24 +418,24 @@ For each of the following, reports the effective value, its source (Group Policy
 - Must be run on a Windows machine (intended for AVD session hosts)
 - PowerShell 5.1 or 7+
 - Administrator rights recommended (required for some registry paths and FSLogix profile size enumeration)
-- `appExclusions.config.json` must be present in the same directory as the script
+- `config/appExclusions.config.json` must be present in the repository root (one level above the `scripts/` folder)
 
 ### Usage Examples
 
 ```powershell
 # Basic collection with prompts
-.\LocalScript.ps1
+.\scripts\Invoke-AvdSessionHostAudit.ps1
 
 # Primary applications only, custom output directory
-.\LocalScript.ps1 -CustomerAbbreviation contoso -PrimaryApplicationsOnly -OutputDirectory C:\exports
+.\scripts\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation contoso -PrimaryApplicationsOnly -OutputDirectory C:\exports
 
 # Skip Group Policy report
-.\LocalScript.ps1 -CustomerAbbreviation contoso -NoGpresult
+.\scripts\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation contoso -NoGpresult
 ```
 
 ### Output File
 
-Written to `vm-discovery/` as `<customer>-<hostname>-avd-discovery-<yyyyMMdd-HHmmss>.json`.
+Written to `output/vm-discovery/` as `<customer>-<hostname>-avd-discovery-<yyyyMMdd-HHmmss>.json`.
 
 Top-level structure:
 
@@ -453,9 +474,9 @@ Top-level structure:
 
 ---
 
-## appExclusions.config.json
+## config/appExclusions.config.json
 
-Controls the `-PrimaryApplicationsOnly` filter in `LocalScript.ps1`. Edit this file to adjust what gets suppressed without modifying any PowerShell code.
+Controls the `-PrimaryApplicationsOnly` filter in `Invoke-AvdSessionHostAudit.ps1`. Edit this file to adjust what gets suppressed without modifying any PowerShell code.
 
 | Section | Purpose |
 |---|---|
@@ -471,14 +492,20 @@ All patterns are case-insensitive by default.
 
 ```
 avd-discovery/
-├── AzureManagementPlane.ps1        # Azure management plane collector
-├── LocalScript.ps1                 # On-host discovery script
-├── appExclusions.config.json       # Application filter configuration
-├── avd-metrics/                    # Output from AzureManagementPlane.ps1
-│   └── <customer>-avd-metrics-<timestamp>.json
-└── vm-discovery/                   # Output from LocalScript.ps1
-    ├── <customer>-<host>-avd-discovery-<timestamp>.json
-    └── <customer>-<host>-gpresult-<timestamp>.html
+├── scripts/
+│   ├── Invoke-AvdMetricsCollection.ps1   # Azure management plane collector
+│   └── Invoke-AvdSessionHostAudit.ps1    # On-host discovery script
+├── config/
+│   ├── appExclusions.config.json         # Application filter configuration
+│   └── ms-service-plan-ids.csv           # Microsoft licence SKU reference data
+├── output/
+│   ├── avd-metrics/                      # Output from Invoke-AvdMetricsCollection.ps1
+│   │   └── <customer>-avd-metrics-<timestamp>.json
+│   └── vm-discovery/                     # Output from Invoke-AvdSessionHostAudit.ps1
+│       ├── <customer>-<host>-avd-discovery-<timestamp>.json
+│       └── <customer>-<host>-gpresult-<timestamp>.html
+├── docs/
+└── README.md
 ```
 
 ---
@@ -514,7 +541,7 @@ For `DiagnosticsStatus: OK` and populated usage metrics, each host pool's Diagno
 
 🟢 = Tested against a live environment &nbsp;&nbsp; 🔴 = Not yet tested
 
-### AzureManagementPlane.ps1
+### Invoke-AvdMetricsCollection.ps1
 
 #### Infrastructure Collection
 | Feature | Status |
@@ -527,6 +554,7 @@ For `DiagnosticsStatus: OK` and populated usage metrics, each host pool's Diagno
 | OS disk size and storage SKU | 🟢 |
 | Network info (VNet, subnet, DNS, NSG, UDR) | 🟢 |
 | Scaling plan name and schedule count | 🔴 |
+| Host pool RDP properties (parsed `customRdpProperty`) | 🔴 |
 
 #### Reservations
 | Feature | Status |
@@ -580,13 +608,13 @@ For `DiagnosticsStatus: OK` and populated usage metrics, each host pool's Diagno
 | Feature | Status |
 |---|---|
 | Finds first running session host in each pool | 🟢 |
-| Downloads and executes `LocalScript.ps1` via VM Run Command | 🟢 |
-| Returns output and saves to `vm-discovery/` | 🟢 |
+| Downloads and executes `Invoke-AvdSessionHostAudit.ps1` via VM Run Command | 🟢 |
+| Returns output and saves to `output/vm-discovery/` | 🟢 |
 | `-GitHubBranch` targeting | 🔴 |
 
 ---
 
-### LocalScript.ps1
+### Invoke-AvdSessionHostAudit.ps1
 
 #### Machine Identity
 | Feature | Status |
