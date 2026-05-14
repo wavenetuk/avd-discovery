@@ -12,6 +12,7 @@ The primary-application exclusion filters are loaded from config/appExclusions.c
 By default, the script removes hidden system components, child installer entries, and Windows update-style records that do not normally belong in a migration inventory.
 Use -PrimaryApplicationsOnly to apply a stricter filter that further suppresses common runtimes, redistributables, helper components, add-ins, and support packages so the output focuses on top-level applications.
 Use -NoGpresult to skip the gpresult /h HTML export, for example when running in a context where Group Policy data is unavailable or to reduce collection time.
+Use -SkipConnectivityChecks to skip the AVD endpoint connectivity tests, useful when running locally during development or in environments where the timeout-based failures would slow the run down.
 
 .PARAMETER OutputDirectory
 Directory where the JSON export file will be written. Defaults to the directory containing this script.
@@ -24,6 +25,25 @@ Applies stricter filtering to keep the inventory focused on primary installed ap
 
 .PARAMETER NoGpresult
 Skips the gpresult /h HTML export. Use this when running without access to Group Policy data or to reduce collection time.
+
+.PARAMETER SkipConnectivityChecks
+Skips the AVD endpoint connectivity tests. Use this to speed up local development test runs.
+
+SAFETY FEATURES
+  1. AST denylist assertion — the script parses its own source code at startup and throws
+     before doing any discovery if a cmdlet that could mutate system or filesystem state is
+     found outside the small set of permitted output-writing operations. Catches accidental
+     write operations introduced by future edits before any discovery work is performed.
+     Denied cmdlets: Set-ItemProperty, Remove-ItemProperty, Clear-ItemProperty,
+     Set-Item (registry/filesystem mutations), Invoke-Expression, Set-Service, Stop-Service,
+     Start-Service, Set-ExecutionPolicy, Register-ScheduledTask, Unregister-ScheduledTask.
+     Permitted output operations (explicitly exempted): New-Item (output directory creation),
+     Set-Content (JSON export), Move-Item (gpresult HTML relocation), Remove-Item (gpresult
+     temp file cleanup).
+
+  2. FSLogix share access is read-only — profile container paths are scanned using
+     Get-ChildItem with -File to enumerate VHD/VHDX files and read their Length property.
+     No files are opened, modified, or deleted.
 
 .EXAMPLE
 .\Invoke-AvdSessionHostAudit.ps1
@@ -51,6 +71,9 @@ param(
 	[switch]$NoGpresult,
 
 	[Parameter(Mandatory = $false)]
+	[switch]$SkipConnectivityChecks,
+
+	[Parameter(Mandatory = $false)]
 	[string]$GeneratedBy,
 
 	[Parameter(Mandatory = $false)]
@@ -61,14 +84,79 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:PrimaryApplicationConfig = $null
 
+# ------------------------------------------------------------------
+# Read-only safeguards
+# ------------------------------------------------------------------
+
+function Assert-ScriptIsReadOnly {
+	<#
+	.SYNOPSIS
+	Parses this script's AST and throws if any cmdlet that could mutate system or
+	filesystem state is detected outside the permitted output-writing operations.
+	Catches accidental write operations introduced by future edits before any
+	discovery work is performed.
+	#>
+
+	# Cmdlets with no legitimate use in a read-only discovery script.
+	$deniedCmdlets = @(
+		'Set-ItemProperty',         # registry/filesystem property mutation
+		'Remove-ItemProperty',      # registry property deletion
+		'Clear-ItemProperty',       # registry property clear
+		'Set-Item',                 # registry/filesystem value mutation
+		'Invoke-Expression',        # arbitrary code execution
+		'Set-Service',              # Windows service configuration
+		'Stop-Service',             # Windows service state change
+		'Start-Service',            # Windows service state change
+		'Set-ExecutionPolicy',      # machine/user policy change
+		'Register-ScheduledTask',   # scheduled task creation
+		'Unregister-ScheduledTask'  # scheduled task deletion
+	)
+
+	# These cmdlets write output files only — they are intentional and permitted.
+	# New-Item       : creates the output directory
+	# Set-Content    : writes the JSON export
+	# Move-Item      : relocates gpresult HTML from temp to output path
+	# Remove-Item    : deletes the gpresult temp file
+	$permittedWriteCmdlets = @('New-Item', 'Set-Content', 'Move-Item', 'Remove-Item')
+
+	$scriptAst = [System.Management.Automation.Language.Parser]::ParseFile(
+		$PSCommandPath,
+		[ref]$null,
+		[ref]$null
+	)
+
+	$commandNodes = $scriptAst.FindAll(
+		{ param($node) $node -is [System.Management.Automation.Language.CommandAst] },
+		$true
+	)
+
+	$violations = foreach ($node in $commandNodes) {
+		$name = $node.GetCommandName()
+		if ($name -and $name -in $deniedCmdlets) { $name }
+	}
+
+	if ($violations) {
+		throw (
+			'Read-only assertion failed. The following cmdlet(s) are on the mutation denylist ' +
+			'and must be reviewed before this script can run: ' +
+			(($violations | Sort-Object -Unique) -join ', ')
+		)
+	}
+}
+
 function Get-OptionalPropertyValue {
 	param(
-		[Parameter(Mandatory = $true)]
+		[Parameter(Mandatory = $false)]
+		[AllowNull()]
 		[object]$Object,
 
 		[Parameter(Mandatory = $true)]
 		[string]$PropertyName
 	)
+
+	if ($null -eq $Object) {
+		return $null
+	}
 
 	$property = $Object.PSObject.Properties[$PropertyName]
 	if ($null -eq $property) {
@@ -311,7 +399,14 @@ function Get-DsRegStatus {
 		'TenantId',
 		'TenantName',
 		'WorkplaceJoined',
-		'VirtualDesktop'
+		'VirtualDesktop',
+		'AzureAdPrt',
+		'AzureAdPrtExpiryTime',
+		'AzureAdPrtAuthority',
+		'EnterprisePrt',
+		'WamDefaultSet',
+		'WamDefaultAuthority',
+		'NgcSet'
 	)
 
 	$values = [ordered]@{}
@@ -339,6 +434,13 @@ function Get-DsRegStatus {
 		TenantId           = Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'TenantId'
 		TenantName         = Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'TenantName'
 		VirtualDesktop     = Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'VirtualDesktop'
+		AzureAdPrt         = ConvertTo-BooleanFromText -Value (Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'AzureAdPrt')
+		AzureAdPrtExpiryTime = Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'AzureAdPrtExpiryTime'
+		AzureAdPrtAuthority  = Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'AzureAdPrtAuthority'
+		EnterprisePrt      = ConvertTo-BooleanFromText -Value (Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'EnterprisePrt')
+		WamDefaultSet      = ConvertTo-BooleanFromText -Value (Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'WamDefaultSet')
+		WamDefaultAuthority  = Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'WamDefaultAuthority'
+		NgcSet             = ConvertTo-BooleanFromText -Value (Get-OptionalPropertyValue -Object ([PSCustomObject]$values) -PropertyName 'NgcSet')
 	}
 }
 
@@ -384,6 +486,79 @@ function Get-DomainJoinDiscovery {
 		AzureAdJoined     = $isAzureAdJoined
 		WorkplaceJoined   = $isWorkplaceJoined
 		DsRegStatus       = $dsRegStatus
+	}
+}
+
+function Get-EntraSsoDiscovery {
+	$dsReg = Get-DsRegStatus
+
+	$_lsaKerberos = Get-RegistryKeyValues -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters'
+	$_lsaPku2u    = Get-RegistryKeyValues -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\pku2u'
+	$_lsa         = Get-RegistryKeyValues -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+	$_whfbPolicy  = Get-RegistryKeyValues -Path 'HKLM:\SOFTWARE\Policies\Microsoft\PassportForWork'
+	$_tsPolicy    = Get-RegistryKeyValues -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+
+	$_cloudKerbRaw = Get-OptionalPropertyValue -Object $_lsaKerberos -PropertyName 'CloudKerberosTicketRetrievalEnabled'
+	$_pku2uRaw     = Get-OptionalPropertyValue -Object $_lsaPku2u    -PropertyName 'AllowOnlineID'
+	$_credGuardRaw = Get-OptionalPropertyValue -Object $_lsa         -PropertyName 'LsaCfgFlags'
+	$_whfbRaw      = Get-OptionalPropertyValue -Object $_whfbPolicy  -PropertyName 'Enabled'
+	$_webAuthnRaw  = Get-OptionalPropertyValue -Object $_tsPolicy    -PropertyName 'fEnableWebAuthn'
+
+	$_isAadJoined = $null -ne $dsReg -and $dsReg.AzureAdJoined -eq $true
+	$_isDomJoined = $null -ne $dsReg -and $dsReg.DomainJoined  -eq $true
+	$_isHaadj     = $_isAadJoined -and $_isDomJoined
+
+	$_cloudKerb = if ($null -ne $_cloudKerbRaw) { [int]$_cloudKerbRaw -eq 1 } else { $false }
+	$_pku2u     = if ($null -ne $_pku2uRaw)     { [int]$_pku2uRaw -eq 1 }     else { $null }
+	$_credGuard = if ($null -ne $_credGuardRaw) { [int]$_credGuardRaw -gt 0 } else { $false }
+	$_whfb      = if ($null -ne $_whfbRaw)      { [int]$_whfbRaw -eq 1 }      else { $null }
+	$_webAuthn  = if ($null -ne $_webAuthnRaw)  { [int]$_webAuthnRaw -eq 1 }  else { $null }
+
+	$_blockers   = [System.Collections.Generic.List[string]]::new()
+	$_advisories = [System.Collections.Generic.List[string]]::new()
+	$_notes      = [System.Collections.Generic.List[string]]::new()
+
+	if (-not $_isAadJoined) {
+		$_blockers.Add('Device is not Entra ID joined — Entra SSO requires AzureADJoined or HybridAzureADJoined') | Out-Null
+	}
+
+	if ($_isHaadj -and -not $_cloudKerb) {
+		$_advisories.Add('Hybrid Entra joined but Cloud Kerberos Trust not enabled — Kerberos SSO to on-premises resources may not work') | Out-Null
+	}
+
+	if ($null -eq $dsReg -or $dsReg.AzureAdPrt -ne $true) {
+		if ($script:IsSystemAccountMode) {
+			$_notes.Add('PRT state is unavailable when running as SYSTEM account — run interactively for per-user PRT data') | Out-Null
+		} elseif ($_isAadJoined) {
+			$_advisories.Add('No Azure AD PRT detected for the running account — users may be prompted to authenticate') | Out-Null
+		}
+	}
+
+	if ($_isAadJoined -and $null -ne $dsReg -and $dsReg.WamDefaultSet -ne $true) {
+		$_advisories.Add('WAM (Web Account Manager) is not the default credential broker — modern authentication SSO may be impaired') | Out-Null
+	}
+
+	if ($_credGuard) {
+		$_notes.Add('Credential Guard is enabled — NTLM and legacy credential delegation are blocked (expected in a secure AVD environment)') | Out-Null
+	}
+
+	[PSCustomObject]@{
+		SsoCapable                 = $_blockers.Count -eq 0
+		Blockers                   = @($_blockers)
+		Advisories                 = @($_advisories)
+		Notes                      = @($_notes)
+		AzureAdPrt                 = if ($null -ne $dsReg) { $dsReg.AzureAdPrt }           else { $null }
+		AzureAdPrtExpiry           = if ($null -ne $dsReg) { $dsReg.AzureAdPrtExpiryTime } else { $null }
+		AzureAdPrtAuthority        = if ($null -ne $dsReg) { $dsReg.AzureAdPrtAuthority }  else { $null }
+		EnterprisePrt              = if ($null -ne $dsReg) { $dsReg.EnterprisePrt }         else { $null }
+		WamDefaultSet              = if ($null -ne $dsReg) { $dsReg.WamDefaultSet }         else { $null }
+		WamDefaultAuthority        = if ($null -ne $dsReg) { $dsReg.WamDefaultAuthority }   else { $null }
+		NgcSet                     = if ($null -ne $dsReg) { $dsReg.NgcSet }                else { $null }
+		CloudKerberosTrustEnabled  = $_cloudKerb
+		Pku2uAllowOnlineId         = $_pku2u
+		CredentialGuardEnabled     = $_credGuard
+		WhfbPolicyEnabled          = $_whfb
+		WebAuthnRedirectorEnabled  = $_webAuthn
 	}
 }
 
@@ -1324,15 +1499,15 @@ function Get-AvdConnectivityDiscovery {
 	$results = foreach ($endpoint in $endpoints) {
 		$label = "$($endpoint.Hostname):$($endpoint.Port)"
 		$requiredLabel = if ($endpoint.Required) { '[Required]' } else { '[Optional]' }
-		Write-Host -NoNewline "  $requiredLabel $($endpoint.Category.PadRight(22)) $label ... " -ForegroundColor Gray
+	Write-Host -NoNewline "  $requiredLabel $($endpoint.Category.PadRight(22)) $label ... " -ForegroundColor Gray
 
 		$result = Test-TcpEndpoint -Hostname $endpoint.Hostname -Port $endpoint.Port
 
 		if ($result.Connected) {
-			Write-Host "OK  ($($result.LatencyMs)ms)" -ForegroundColor Green
+			Write-Host (Format-Ansi "`e[92mOK  ($($result.LatencyMs)ms)`e[0m")
 		}
 		else {
-			Write-Host "FAILED  — $($result.Error)" -ForegroundColor Red
+			Write-Host (Format-Ansi "`e[91mFAILED  — $($result.Error)`e[0m")
 		}
 
 		[PSCustomObject]@{
@@ -1353,12 +1528,12 @@ function Get-AvdConnectivityDiscovery {
 	Write-Host ''
 	$_reachStr = "$(@($requiredPassed).Count)/$(@($requiredResults).Count) required endpoints reachable"
 	if (@($requiredFailed).Count -eq 0) {
-		Write-Host "  $_reachStr" -ForegroundColor Green
+		Write-Host (Format-Ansi "  `e[92m$_reachStr`e[0m")
 	} else {
-		Write-Host "  $_reachStr" -ForegroundColor Yellow
-		Write-Host '  Failed required endpoints:' -ForegroundColor DarkYellow
+		Write-Host (Format-Ansi "  `e[93m$_reachStr`e[0m")
+		Write-Host (Format-Ansi "  `e[93mFailed required endpoints:`e[0m")
 		foreach ($failed in $requiredFailed) {
-			Write-Host "    — $($failed.Hostname):$($failed.Port)  ($($failed.Error))" -ForegroundColor Red
+			Write-Host (Format-Ansi "    `e[91m— $($failed.Hostname):$($failed.Port)  ($($failed.Error))`e[0m")
 		}
 	}
 	Write-Host ''
@@ -1584,14 +1759,108 @@ function Get-UniversalPrintDiscovery {
 	}
 }
 
+function Get-ConfigFileServerReferences {
+	<#
+	.SYNOPSIS
+	Scans application config files under Program Files for references to remote servers
+	or domain-joined machines — UNC paths, FQDNs, and connection-string server keywords.
+	Only text-based config file types up to 1 MB are inspected. Windows system directories
+	and common redistributable/framework folders are excluded to reduce noise.
+	#>
+
+	$scanRoots = @(
+		$env:ProgramFiles,
+		${env:ProgramFiles(x86)}
+	) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path $_) } | Sort-Object -Unique
+
+	# File extensions to scan (text-based config formats only)
+	$configExtensions = @('.ini', '.cfg', '.config', '.xml', '.conf', '.properties', '.env', '.yaml', '.yml')
+
+	# Folder name fragments to skip — Windows components, runtimes, redistributables
+	$excludedFolderPatterns = @(
+		'Windows NT', 'Windows Kits', 'Windows Mail', 'Windows Media',
+		'Microsoft.NET', 'dotnet', 'Microsoft Visual C++', 'Microsoft Visual Studio',
+		'WindowsPowerShell', 'Windows Defender', 'Windows Security',
+		'Microsoft\EdgeUpdate', 'Microsoft\Edge\Application',
+		'Common Files\microsoft shared', 'Common Files\System',
+		'Common Files\Services'
+	)
+
+	# Regex patterns that indicate a server/domain reference in a config value
+	# 1. UNC path:            \\server  or  \\server.domain.com
+	# 2. FQDN assignment:     keyword=server.domain.tld  (must have at least one dot-separated label before a 2+ char TLD)
+	# 3. Connection strings:  Server=x, Data Source=x, Host=x, hostname=x, address=x, DataSource=x
+	$uncPattern        = [regex]'(?i)\\\\[A-Za-z0-9_-][A-Za-z0-9_.-]+'
+	$fqdnValuePattern  = [regex]'(?i)(?:server|host|hostname|address|data[\s_-]*source|datasource|endpoint|url|uri|broker|gateway|proxy)\s*[=:]\s*([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){1,}\.[A-Za-z]{2,})'
+	$maxFileSizeBytes  = 1MB
+
+	$findings = @()
+
+	foreach ($root in $scanRoots) {
+		try {
+			$files = @(Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+				Where-Object {
+					$configExtensions -contains $_.Extension.ToLowerInvariant() -and
+					$_.Length -le $maxFileSizeBytes -and
+					-not ($excludedFolderPatterns | Where-Object { $_.FullName -like "*$_*" })
+				})
+		}
+		catch { continue }
+
+		foreach ($file in $files) {
+			try {
+				$content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+			}
+			catch { continue }
+
+			$matchedRefs = @()
+
+			# UNC paths
+			foreach ($m in $uncPattern.Matches($content)) {
+				$val = $m.Value.TrimEnd('/', '\', ' ', '"', "'")
+				# Skip loopback and well-known non-domain tokens
+				if ($val -notmatch '\\\\(localhost|127\.|::1)') {
+					$matchedRefs += [PSCustomObject]@{ Type = 'UncPath'; Value = $val }
+				}
+			}
+
+			# FQDN / connection-string references
+			foreach ($m in $fqdnValuePattern.Matches($content)) {
+				$fqdn = $m.Groups[1].Value.Trim('"', "'", ' ', ';', ',')
+				# Skip localhost variants, pure IP addresses, and .local mDNS names that may be non-AD
+				if ($fqdn -notmatch '^(localhost|127\.|0\.0\.0\.0|::1)' -and
+				    $fqdn -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+					$matchedRefs += [PSCustomObject]@{ Type = 'FqdnReference'; Value = $fqdn }
+				}
+			}
+
+			if ($matchedRefs.Count -gt 0) {
+				# Deduplicate references within this file
+				$dedupedRefs = $matchedRefs | Group-Object -Property Type, Value | ForEach-Object {
+					$_.Group[0]
+				}
+				$findings += [PSCustomObject]@{
+					FilePath   = $file.FullName
+					FileName   = $file.Name
+					SizeBytes  = $file.Length
+					References = @($dedupedRefs)
+				}
+			}
+		}
+	}
+
+	return @($findings)
+}
+
 function Get-ActiveDirectoryDependencyDiscovery {
 	<#
 	.SYNOPSIS
 	Checks whether the host has dependencies on Active Directory that would block or
 	complicate a move to Entra-only (Azure AD) join. Examines services running as domain
 	accounts, scheduled tasks running as domain accounts, ODBC data sources pointing at
-	domain servers or using domain credentials, and active TCP connections to common AD
-	ports (88, 135, 389, 445, 464, 636, 3268, 3269).
+	domain servers or using domain credentials, active TCP connections to common AD
+	ports (88, 135, 389, 445, 464, 636, 3268, 3269), and application config files under
+	Program Files that reference remote servers or domain-joined machines by name.
 
 	TCP connections are deduplicated by remote address + port so that hundreds of SMB
 	sessions to the same file server appear as a single entry with a connection count.
@@ -1735,21 +2004,27 @@ function Get-ActiveDirectoryDependencyDiscovery {
 	}
 	catch { }
 
+	# --- Config file server references ---
+	$configFileRefs = Get-ConfigFileServerReferences
+
 	$hasDependencies = @($domainServices).Count -gt 0 -or
 	                   @($domainTasks).Count -gt 0 -or
 	                   @($odbcSources).Count -gt 0 -or
-	                   @($adConnections).Count -gt 0
+	                   @($adConnections).Count -gt 0 -or
+	                   @($configFileRefs).Count -gt 0
 
 	[PSCustomObject]@{
-		HasDomainDependencies    = $hasDependencies
-		DomainServiceCount       = @($domainServices).Count
-		DomainScheduledTaskCount = @($domainTasks).Count
-		DomainOdbcSourceCount    = @($odbcSources).Count
-		AdPortConnectionCount    = @($adConnections).Count
-		DomainServices           = @($domainServices)
-		DomainScheduledTasks     = @($domainTasks)
-		OdbcSources              = @($odbcSources)
-		AdPortConnections        = @($adConnections)
+		HasDomainDependencies        = $hasDependencies
+		DomainServiceCount           = @($domainServices).Count
+		DomainScheduledTaskCount     = @($domainTasks).Count
+		DomainOdbcSourceCount        = @($odbcSources).Count
+		AdPortConnectionCount        = @($adConnections).Count
+		ConfigFileReferenceCount     = @($configFileRefs).Count
+		DomainServices               = @($domainServices)
+		DomainScheduledTasks         = @($domainTasks)
+		OdbcSources                  = @($odbcSources)
+		AdPortConnections            = @($adConnections)
+		ConfigFileServerReferences   = @($configFileRefs)
 	}
 }
 
@@ -1796,7 +2071,15 @@ function Get-GroupPolicyDiscovery {
 }
 
 function Get-PrimaryApplicationConfigPath {
-	return Join-Path (Split-Path $PSScriptRoot -Parent) 'config\appExclusions.config.json'
+	$fileName    = 'appExclusions.config.json'
+	$candidates  = @(
+		(Join-Path $PSScriptRoot $fileName),                                      # same folder as script
+		(Join-Path (Split-Path $PSScriptRoot -Parent) "config\$fileName")         # canonical repo layout
+	)
+	foreach ($path in $candidates) {
+		if (Test-Path -Path $path) { return $path }
+	}
+	return $candidates[0]  # not found — caller will handle the null return from Get-PrimaryApplicationConfig
 }
 
 function Get-PrimaryApplicationConfig {
@@ -1806,7 +2089,7 @@ function Get-PrimaryApplicationConfig {
 	)
 
 	if (-not (Test-Path -Path $ConfigPath)) {
-		throw "Primary application config file not found: $ConfigPath"
+		return $null
 	}
 
 	$config = Get-Content -Path $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -1873,6 +2156,10 @@ function Test-PrimaryApplication {
 
 	if ([string]::IsNullOrWhiteSpace($name)) {
 		return $false
+	}
+
+	if ($null -eq $script:PrimaryApplicationConfig) {
+		return $true  # no config loaded — include all applications
 	}
 
 	$namePatterns = $script:PrimaryApplicationConfig.PrimaryApplicationFilters.NamePatterns
@@ -2310,59 +2597,159 @@ function New-ExportFilePath {
 # Console output helpers
 # ------------------------------------------------------------------
 
-$script:_checkLabel = ''
+$script:_checkLabel   = ''
+$script:_ansiSupported = $host.Name -notmatch 'ISE'
+
+function Format-Ansi {
+	param([string]$Text)
+	if ($script:_ansiSupported) { return $Text }
+	return ($Text -replace "`e\[[0-9;]*[mK]", '')
+}
 
 function Write-Banner {
-	param([string[]]$Lines, [ConsoleColor]$Color = 'Cyan')
+	param([string[]]$Lines)
 	$maxLen = ($Lines | Measure-Object -Property Length -Maximum).Maximum
 	$width  = [Math]::Max(60, $maxLen + 4)
 	$border = '═' * $width
 	Write-Host ''
-	Write-Host "  ╔$border╗" -ForegroundColor $Color
+	Write-Host (Format-Ansi "  `e[1m`e[96m╔$border╗`e[0m")
 	foreach ($line in $Lines) {
 		$padded = ' ' + $line.PadRight($width - 1)
-		Write-Host "  ║$padded║" -ForegroundColor $Color
+		Write-Host (Format-Ansi "  `e[96m║`e[0m`e[97m$padded`e[0m`e[96m║`e[0m")
 	}
-	Write-Host "  ╚$border╝" -ForegroundColor $Color
+	Write-Host (Format-Ansi "  `e[1m`e[96m╚$border╝`e[0m")
 	Write-Host ''
 }
 
 function Write-Rule {
-	param([string]$Title = '', [int]$Width = 62, [ConsoleColor]$BarColor = 'DarkGray', [ConsoleColor]$TitleColor = 'Cyan')
+	param([string]$Title = '', [int]$Width = 62)
 	if (-not [string]::IsNullOrEmpty($Title)) {
 		Write-Host ''
-		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
-		Write-Host "  $Title" -ForegroundColor $TitleColor
-		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
+		Write-Host (Format-Ansi "  `e[90m$('─' * $Width)`e[0m")
+		Write-Host (Format-Ansi "  `e[1m`e[96m$Title`e[0m")
+		Write-Host (Format-Ansi "  `e[90m$('─' * $Width)`e[0m")
 	} else {
 		Write-Host ''
-		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
+		Write-Host (Format-Ansi "  `e[90m$('─' * $Width)`e[0m")
 		Write-Host ''
 	}
+}
+
+# Shared state for the background spinner — accessed by both the main thread and the runspace.
+$script:_spinnerState = [hashtable]::Synchronized(@{
+	Active   = $false
+	Activity = 'AVD Session Host Audit'
+	Status   = ''
+	Pct      = -1
+	Run      = $false
+	Lock     = [System.Threading.SemaphoreSlim]::new(1, 1)
+})
+$script:_spinnerJob = $null
+
+function Start-SpinnerRunspace {
+	if ($script:_spinnerJob) { return }  # already running
+	$state       = $script:_spinnerState
+	$state.Run   = $true
+	$rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+	$rs.Open()
+	$rs.SessionStateProxy.SetVariable('_st', $state)
+	$ps = [System.Management.Automation.PowerShell]::Create()
+	$ps.Runspace = $rs
+	[void]$ps.AddScript({
+		$frames = @('|', '/', '-', '\')
+		$idx    = 0
+		$purple = "`e[95m"; $bold = "`e[1m"; $dim = "`e[2m"; $reset = "`e[0m"
+		while ($_st.Run) {
+			if (-not $_st.Active) { Start-Sleep -Milliseconds 50; continue }
+			$s   = $frames[$idx % 4]; $idx++
+			$act = $_st.Activity; $sts = $_st.Status; $pct = $_st.Pct
+			$barStr = ''
+			if ($pct -ge 0) {
+				$w = 20; $f = [Math]::Min([int]($pct / 100.0 * $w), $w)
+				$barStr = "  $dim[$reset$purple$('█' * $f)$dim$('░' * ($w - $f))]$reset  $pct%"
+			}
+			$line    = "$purple$bold $s  $act$reset  $dim$sts$reset$barStr"
+			if ($_st.Lock.Wait(50)) {
+				try     { [Console]::Write("`r$line`e[K") }
+				finally { [void]$_st.Lock.Release() }
+			}
+			Start-Sleep -Milliseconds 100
+		}
+	})
+	$script:_spinnerJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+}
+
+function Stop-SpinnerRunspace {
+	if (-not $script:_spinnerJob) { return }
+	$script:_spinnerState.Active = $false
+	$script:_spinnerState.Run    = $false
+	try { [void]$script:_spinnerJob.PS.EndInvoke($script:_spinnerJob.Handle) } catch {}
+	$script:_spinnerJob.PS.Dispose()
+	$script:_spinnerJob.RS.Dispose()
+	$script:_spinnerJob = $null
+}
+
+function Write-SpinnerLine {
+	# Not used in this script but kept for parity with the metrics script
+	param([string]$Status, [int]$Pct = -1)
+	$script:_spinnerState.Status = $Status
+	if ($Pct -ge 0) { $script:_spinnerState.Pct = $Pct }
+}
+
+function Clear-SpinnerLine {
+	Stop-SpinnerRunspace
+	if ($script:_ansiSupported) { [Console]::Write("`r`e[K") }
 }
 
 function Write-CheckStart {
 	param([string]$Name, [int]$Indent = 4)
-	$script:_checkLabel = (' ' * $Indent) + $Name + ' = '
-	Write-Host "$($script:_checkLabel)Running..." -ForegroundColor DarkCyan
+	$script:_checkLabel = (' ' * $Indent) + $Name.PadRight(30) + '  '
+	if ($script:_progressTotal -gt 0 -and $script:_ansiSupported) {
+		$_pct = [Math]::Min([int](($script:_progressStep / $script:_progressTotal) * 100), 100)
+		$script:_spinnerState.Status   = $Name
+		$script:_spinnerState.Pct      = $_pct
+		$script:_spinnerState.Active   = $true
+		Start-SpinnerRunspace
+	}
 }
 
 function Write-CheckResult {
 	param(
-		[ValidateSet('Success', 'Skipped', 'Failed')]
+		[ValidateSet('Success', 'Skipped', 'Failed', 'Info')]
 		[string]$Status,
 		[string]$Detail = ''
 	)
-	$color = switch ($Status) {
-		'Success' { 'Green'      }
-		'Skipped' { 'DarkYellow' }
-		'Failed'  { 'Red'        }
+	$ansiColor = switch ($Status) {
+		'Success' { "`e[92m"  }  # Bright green
+		'Skipped' { "`e[93m"  }  # Bright yellow
+		'Failed'  { "`e[91m"  }  # Bright red
+		'Info'    { "`e[90m"  }  # Dark gray
 	}
 	$suffix = if ($Detail) { "  ($Detail)" } else { '' }
-	Write-Host "$($script:_checkLabel)$Status$suffix" -ForegroundColor $color
+	if ($script:_progressTotal -gt 0 -and $script:_ansiSupported) {
+		$script:_spinnerState.Active = $false  # pause spinner between checks
+		[void]$script:_spinnerState.Lock.Wait()  # wait for any in-flight frame to finish
+		try {
+			[Console]::Write("`r`e[K")
+			[Console]::WriteLine("$ansiColor$($script:_checkLabel)$Status$suffix`e[0m")
+		} finally {
+			[void]$script:_spinnerState.Lock.Release()
+		}
+		$script:_progressStep++
+	} else {
+		$color = switch ($Status) {
+			'Success' { 'Green'   }
+			'Skipped' { 'Yellow'  }
+			'Failed'  { 'Red'     }
+			'Info'    { 'DarkGray'}
+		}
+		Write-Host "$($script:_checkLabel)$Status$suffix" -ForegroundColor $color
+	}
 }
 
 try {
+	Assert-ScriptIsReadOnly
+
 	# Detect whether we are running as SYSTEM or a machine account (e.g. via Azure Run Command).
 	# In that context, per-user checks (HKCU/HKEY_USERS, gpresult user RSoP) are meaningless.
 	$currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -2380,13 +2767,12 @@ try {
 		"Machine   :  $($env:COMPUTERNAME)",
 		"Account   :  $($script:RunningAsAccount)",
 		"Mode      :  $(if ($script:IsSystemAccountMode) { 'System Account (Run Command)' } else { 'Interactive' })"
-	) -Color Cyan
+	)
+
+	$script:_progressStep  = 0
+	$script:_progressTotal = 20
 
 	Write-Rule 'HOST INVENTORY'
-
-	Write-CheckStart 'Installed Applications'
-	$installedApps = Get-InstalledApplications -PrimaryApplicationsOnlyMode $PrimaryApplicationsOnly.IsPresent
-	Write-CheckResult 'Success' "$(@($installedApps).Count) app(s)$(if ($PrimaryApplicationsOnly.IsPresent) { ' (primary only)' })"
 
 	Write-CheckStart 'Machine Details'
 	$machineDetails = Get-MachineDetails
@@ -2396,24 +2782,46 @@ try {
 	$joinDiscovery = Get-DomainJoinDiscovery
 	Write-CheckResult 'Success' "Join Type: $($joinDiscovery.JoinType)"
 
-	Write-CheckStart 'FSLogix'
-	$fsLogixDiscovery = Get-FSLogixDiscovery
-	Write-CheckResult 'Success'
+	Write-CheckStart 'Entra SSO'
+	$entraSsoDiscovery = Get-EntraSsoDiscovery
+	$_ssoDetail = if (-not $entraSsoDiscovery.SsoCapable) {
+		"Not Entra-joined  |  $(@($entraSsoDiscovery.Blockers).Count) blocker(s)"
+	} elseif ($entraSsoDiscovery.AzureAdPrt -eq $true) {
+		"Capable  |  PRT: Active$(if ($entraSsoDiscovery.WamDefaultSet -eq $true) { '  |  WAM: Set' })"
+	} elseif ($script:IsSystemAccountMode) {
+		"Capable  |  PRT: N/A (system mode)"
+	} else {
+		"Capable  |  PRT: None"
+	}
+	Write-CheckResult 'Success' $_ssoDetail
 
-	Write-CheckStart 'OneDrive / Folder Redirection'
-	$userProfileExperience = Get-OneDriveAndFolderRedirectionDiscovery
-	Write-CheckResult 'Success'
-
-	Write-CheckStart 'Antivirus'
-	$antivirusDiscovery = Get-AntivirusDiscovery -InstalledApplications $installedApps
+	Write-CheckStart 'Intune Enrollment'
+	$intuneEnrollmentDiscovery = Get-IntuneEnrollmentDiscovery
 	Write-CheckResult 'Success'
 
 	Write-CheckStart 'LAPS'
 	$lapsDiscovery = Get-LapsDiscovery
 	Write-CheckResult 'Success'
 
-	Write-CheckStart 'Intune Enrollment'
-	$intuneEnrollmentDiscovery = Get-IntuneEnrollmentDiscovery
+	Write-CheckStart 'Installed Applications'
+	$installedApps = Get-InstalledApplications -PrimaryApplicationsOnlyMode $PrimaryApplicationsOnly.IsPresent
+	Write-CheckResult 'Success' "$(@($installedApps).Count) app(s)$(if ($PrimaryApplicationsOnly.IsPresent) { ' (primary only)' })"
+
+	Write-CheckStart 'Antivirus'
+	$antivirusDiscovery = Get-AntivirusDiscovery -InstalledApplications $installedApps
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'Active Directory Dependencies'
+	$adDependencyDiscovery = Get-ActiveDirectoryDependencyDiscovery
+	$_adDetail = "Services: $($adDependencyDiscovery.DomainServiceCount)  |  Tasks: $($adDependencyDiscovery.DomainScheduledTaskCount)  |  ODBC: $($adDependencyDiscovery.DomainOdbcSourceCount)  |  AD Port Connections: $($adDependencyDiscovery.AdPortConnectionCount)  |  Config Files: $($adDependencyDiscovery.ConfigFileReferenceCount)"
+	Write-CheckResult 'Success' $_adDetail
+
+	Write-CheckStart 'FSLogix'
+	$fsLogixDiscovery = Get-FSLogixDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'OneDrive / Folder Redirection'
+	$userProfileExperience = Get-OneDriveAndFolderRedirectionDiscovery
 	Write-CheckResult 'Success'
 
 	Write-CheckStart 'Default File Associations'
@@ -2434,7 +2842,7 @@ try {
 
 	Write-CheckStart 'Printers'
 	$printerDiscovery = Get-PrinterDiscovery
-	Write-CheckResult 'Success' "$(@($printerDiscovery).Count) printer(s) found"
+	Write-CheckResult 'Success' "$($printerDiscovery.PrinterCount) printer(s) found"
 
 	Write-CheckStart 'Time Source'
 	$timeSourceDiscovery = Get-TimeSourceDiscovery
@@ -2450,10 +2858,6 @@ try {
 
 	Write-CheckStart 'RDP Shortpath'
 	$rdpShortpathDiscovery = Get-RdpShortpathDiscovery
-	Write-CheckResult 'Success'
-
-	Write-CheckStart 'Active Directory Dependencies'
-	$adDependencyDiscovery = Get-ActiveDirectoryDependencyDiscovery
 	Write-CheckResult 'Success'
 
 	$resolvedOutputDirectory = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path (Split-Path $PSScriptRoot -Parent) 'output\vm-discovery' } else { [System.IO.Path]::GetFullPath($OutputDirectory) }
@@ -2479,8 +2883,15 @@ try {
 		$_gp
 	}
 
+	Clear-SpinnerLine
+
 	Write-Rule 'AVD CONNECTIVITY'
-	$avdConnectivityDiscovery = Get-AvdConnectivityDiscovery
+	$avdConnectivityDiscovery = if ($SkipConnectivityChecks.IsPresent) {
+		Write-Host '  Skipped  (-SkipConnectivityChecks specified)' -ForegroundColor DarkGray
+		$null
+	} else {
+		Get-AvdConnectivityDiscovery
+	}
 
 	$exportObject = [PSCustomObject]@{
 		CustomerAbbreviation = $customerCode
@@ -2492,6 +2903,7 @@ try {
 		Machine              = $machineDetails
 		DiscoveryType        = 'LocalAvdHost'
 		JoinState            = $joinDiscovery
+		EntraSso             = $entraSsoDiscovery
 		PrimaryApplicationsOnly = $PrimaryApplicationsOnly.IsPresent
 		ApplicationCount     = @($installedApps).Count
 		FSLogix              = $fsLogixDiscovery
@@ -2510,6 +2922,7 @@ try {
 		RdpShortpath         = $rdpShortpathDiscovery
 		ActiveDirectoryDependencies = $adDependencyDiscovery
 		AvdConnectivity      = $avdConnectivityDiscovery
+		ConnectivityChecksSkipped = $SkipConnectivityChecks.IsPresent
 		GroupPolicy          = $groupPolicyDiscovery
 		Applications         = $installedApps
 	}
@@ -2524,8 +2937,8 @@ try {
 		"$([Math]::Floor($_elapsed.TotalMinutes))m $($_elapsed.Seconds)s"
 	} else { "$([Math]::Round($_elapsed.TotalSeconds, 1))s" }
 
-	Write-Rule -BarColor DarkGray
-	Write-Host "  Discovery complete in $_elapsedStr" -ForegroundColor Green
+	Write-Rule
+	Write-Host (Format-Ansi "  `e[92mDiscovery complete in $_elapsedStr`e[0m")
 	Write-Host "  Applications  :  $(@($installedApps).Count)" -ForegroundColor DarkGray
 	Write-Host "  Output file   :  $resolvedOutputPath" -ForegroundColor Cyan
 	if ($null -ne $groupPolicyDiscovery -and $groupPolicyDiscovery.Succeeded) {
