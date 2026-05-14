@@ -30,6 +30,7 @@ Enumerates all AVD host pools across one or more Azure subscriptions and collect
 - OS disk size (GB) and storage SKU
 - VNet, subnet, address prefixes, custom DNS servers, NSG, and UDR names
 - Scaling plan name and schedule count (if configured)
+- Host pool RDP properties (`customRdpProperty`) — the AVD-enforced redirection settings sent to connecting clients, parsed into a structured object covering drive, clipboard, printer, smart card, audio, camera, USB, and location redirection
 
 #### Reservations
 - Whether any Azure Reserved VM Instances match the pool's VM SKU and region
@@ -90,7 +91,7 @@ Enumerates all AVD host pools across one or more Azure subscriptions and collect
 - **For usage metrics**: Diagnostic Settings on each host pool forwarding `Connection`, `Error`, `Checkpoint`, and `HostRegistration` log categories to a Log Analytics workspace
 - **For licence data**: the authenticated account requires Microsoft Graph `User.Read.All` and `Group.Read.All` (or equivalent)
 - **For `-RunLocalDiscovery`**: session host VMs must have outbound HTTPS access to `raw.githubusercontent.com` so they can download the scripts at runtime (or use `-InlineLocalScript` to bypass this requirement)
-- **For `-RunAsUser`**: a domain account with the right to log on to the session host interactively; credentials are collected once before discovery begins and are never written to disk
+- **For `-RunAsUser`**: a low-privilege domain account with interactive logon rights on the session host; credentials are collected once before discovery begins, transmitted in plaintext in the ARM request body, and may appear in Azure ARM activity logs — see the [Run-As Mode](#run-as-mode--runasuser) section for full security implications
 
 ### Usage Examples
 
@@ -172,6 +173,19 @@ Each object in `HostPools` contains:
   "OsDiskSkus": ["Premium_LRS"],
   "NetworkInfo": [ ... ],
   "ScalingPlan": null,
+  "RdpProperties": {
+    "RawPropertyString": "drivestoredirect:s:;redirectclipboard:i:0;redirectprinters:i:0;audiomode:i:0;audiocapturemode:i:1",
+    "AllSettings": { "drivestoredirect": "", "redirectclipboard": 0, "redirectprinters": 0, "audiomode": 0, "audiocapturemode": 1 },
+    "DriveRedirection": { "Enabled": false, "Value": "" },
+    "ClipboardRedirection": { "Enabled": false, "RawValue": 0 },
+    "PrinterRedirection": { "Enabled": false, "RawValue": 0 },
+    "SmartCardRedirection": null,
+    "AudioPlayback": { "Display": "PlayOnClient", "RawValue": 0 },
+    "AudioCapture": { "Enabled": true, "RawValue": 1 },
+    "CameraRedirection": null,
+    "UsbRedirection": null,
+    "LocationRedirection": null
+  },
   "ReservationMatchStatus": "Match",
   "MatchedReservations": [ ... ],
   "BackupInfoStatus": "NotApplicable",
@@ -274,15 +288,22 @@ During polling, every third check also queries the Run Command **instance view**
 
 Azure VM Run Command normally executes as `NT AUTHORITY\SYSTEM`. This means per-user registry hives, shell folder redirections, mapped drives, and Outlook cached-mode settings are not visible to `LocalScript.ps1` — the output will be marked `"CollectionMode": "SystemAccount"` and those checks are skipped.
 
-Add `-RunAsUser` to run as a real domain account instead:
+Add `-RunAsUser` to run as a domain account instead:
 
 ```powershell
 .\.AzureManagementPlane.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -RunAsUser
 ```
 
-Before discovery begins you will see a prominent warning and be prompted for a username and password. Credentials are held in memory only for the duration of the run and are never written to disk. The script runs once per host pool, targeting a single powered-on session host, so you only need to enter credentials once per execution.
+Before discovery begins you will see a prominent warning and be prompted for a username and password. The script runs once per host pool, targeting a single powered-on session host, so you only need to enter credentials once per execution.
 
-> **Security note:** The account used needs the right to log on to the session host interactively. A read-only service account with interactive logon rights is preferred over a full admin account.
+> **⚠ Security implications — read before using:**
+>
+> - **Credentials are transmitted in plaintext.** The username and password are sent as plain text in the Azure ARM API request body. They are not encrypted beyond the HTTPS transport layer.
+> - **Temporarily stored in Azure.** The credentials are held inside the `runCommands` ARM resource for the duration of the run. The script deletes this resource on completion, but it exists in Azure for several minutes.
+> - **Username is visible in ARM activity logs; password is not.** Azure ARM activity logs record the response body returned by the API, not the request body sent to it. Since Azure never echoes `runAsPassword` back in its response, the password does not appear in standard activity logs. However, the username (`runAsUser`) is present in the logged response body and will be visible to anyone with `Reader` access on the subscription for up to 90 days. If your organisation exports activity logs to a Log Analytics workspace or storage account, the same applies to those copies.
+> - **ARM activity log entries cannot be deleted.** Azure platform activity logs are immutable — individual entries cannot be removed. The entries age out automatically after the configured retention period (90 days by default). If your organisation exports to Log Analytics or a storage account via a Diagnostic Setting, those copies can be purged separately (delete the relevant rows in Log Analytics, or delete the blob in the storage account).
+> - **Use a low-privilege domain account only.** The account must be able to log on to the session host interactively, but should have no other elevated rights. Do not use admin accounts, service accounts with broad permissions, or shared credentials.
+> - **Local accounts are not suitable.** The Azure VM Run Command `runAsUser` feature requires a domain account (format: `DOMAIN\user` or `user@domain.com`). Local administrator accounts should not be used — they are specifically the type of privileged account this feature warns against.
 
 ### Inline Mode (`-InlineLocalScript`)
 
@@ -527,6 +548,7 @@ For `DiagnosticsStatus: OK` and populated usage metrics, each host pool's Diagno
 | OS disk size and storage SKU | 🟢 |
 | Network info (VNet, subnet, DNS, NSG, UDR) | 🟢 |
 | Scaling plan name and schedule count | 🔴 |
+| Host pool RDP properties (parsed `customRdpProperty`) | 🔴 |
 
 #### Reservations
 | Feature | Status |

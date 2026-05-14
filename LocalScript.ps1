@@ -48,7 +48,13 @@ param(
 	[switch]$PrimaryApplicationsOnly,
 
 	[Parameter(Mandatory = $false)]
-	[switch]$NoGpresult
+	[switch]$NoGpresult,
+
+	[Parameter(Mandatory = $false)]
+	[string]$GeneratedBy,
+
+	[Parameter(Mandatory = $false)]
+	[string]$ProjectCode
 )
 
 Set-StrictMode -Version Latest
@@ -1031,10 +1037,18 @@ function Get-UserShellFolderState {
 }
 
 function Get-OneDrivePolicyState {
+	# Registry paths where OneDrive KFM/policy values are written, in priority order.
+	# Both Group Policy (ADMX via GPO) and Intune MDM write to the Policies hive.
+	# Intune also writes to the MDM bridge path below, which we use to distinguish them.
 	$policyPaths = @(
 		'HKLM:\SOFTWARE\Policies\Microsoft\OneDrive',
 		'HKCU:\SOFTWARE\Policies\Microsoft\OneDrive'
 	)
+
+	# MDM bridge: Intune writes policy values here in addition to the Policies hive.
+	# Presence of values here (when the Policies hive also has values) indicates Intune.
+	$mdmBridgePath = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\OneDrive'
+	$mdmBridgeValues = Get-RegistryKeyValues -Path $mdmBridgePath
 
 	$policies = foreach ($path in $policyPaths) {
 		$values = Get-RegistryKeyValues -Path $path
@@ -1042,8 +1056,16 @@ function Get-OneDrivePolicyState {
 			continue
 		}
 
+		# Determine policy source:
+		#   - HKCU paths are always user-scoped Group Policy (not Intune MDM, which is machine-scoped)
+		#   - HKLM Policies hive: check MDM bridge to distinguish Intune from GP
+		$isHkcu   = $path -like 'HKCU:*'
+		$isIntune = (-not $isHkcu) -and ($null -ne $mdmBridgeValues) -and (@($mdmBridgeValues.PSObject.Properties).Count -gt 0)
+		$source   = if ($isHkcu) { 'GroupPolicy-User' } elseif ($isIntune) { 'Intune-MDM' } else { 'GroupPolicy-Computer' }
+
 		[PSCustomObject]@{
 			RegistryPath = $path
+			Source       = $source
 			Values       = $values
 		}
 	}
@@ -1296,22 +1318,21 @@ function Get-AvdConnectivityDiscovery {
 		[PSCustomObject]@{ Hostname = '169.254.169.254';                            Port = 80;   Category = 'AzureIMDS';             Required = $false }
 	)
 
-	Write-Host ''
-	Write-Host 'Running AVD network connectivity tests...'
+	Write-Host '  Testing AVD network connectivity endpoints...' -ForegroundColor DarkGray
 	Write-Host ''
 
 	$results = foreach ($endpoint in $endpoints) {
 		$label = "$($endpoint.Hostname):$($endpoint.Port)"
 		$requiredLabel = if ($endpoint.Required) { '[Required]' } else { '[Optional]' }
-		Write-Host -NoNewline "  $requiredLabel $($endpoint.Category.PadRight(22)) $label ... "
+		Write-Host -NoNewline "  $requiredLabel $($endpoint.Category.PadRight(22)) $label ... " -ForegroundColor Gray
 
 		$result = Test-TcpEndpoint -Hostname $endpoint.Hostname -Port $endpoint.Port
 
 		if ($result.Connected) {
-			Write-Host "OK ($($result.LatencyMs)ms)"
+			Write-Host "OK  ($($result.LatencyMs)ms)" -ForegroundColor Green
 		}
 		else {
-			Write-Host "FAILED - $($result.Error)"
+			Write-Host "FAILED  — $($result.Error)" -ForegroundColor Red
 		}
 
 		[PSCustomObject]@{
@@ -1330,11 +1351,14 @@ function Get-AvdConnectivityDiscovery {
 	$requiredFailed  = @($requiredResults | Where-Object { -not $_.Connected })
 
 	Write-Host ''
-	Write-Host "Required endpoints: $(@($requiredPassed).Count)/$(@($requiredResults).Count) reachable"
-	if (@($requiredFailed).Count -gt 0) {
-		Write-Host 'Failed required endpoints:'
+	$_reachStr = "$(@($requiredPassed).Count)/$(@($requiredResults).Count) required endpoints reachable"
+	if (@($requiredFailed).Count -eq 0) {
+		Write-Host "  $_reachStr" -ForegroundColor Green
+	} else {
+		Write-Host "  $_reachStr" -ForegroundColor Yellow
+		Write-Host '  Failed required endpoints:' -ForegroundColor DarkYellow
 		foreach ($failed in $requiredFailed) {
-			Write-Host "  - $($failed.Hostname):$($failed.Port) ($($failed.Error))"
+			Write-Host "    — $($failed.Hostname):$($failed.Port)  ($($failed.Error))" -ForegroundColor Red
 		}
 	}
 	Write-Host ''
@@ -2282,6 +2306,62 @@ function New-ExportFilePath {
 	return Join-Path -Path $Directory -ChildPath $fileName
 }
 
+# ------------------------------------------------------------------
+# Console output helpers
+# ------------------------------------------------------------------
+
+$script:_checkLabel = ''
+
+function Write-Banner {
+	param([string[]]$Lines, [ConsoleColor]$Color = 'Cyan')
+	$maxLen = ($Lines | Measure-Object -Property Length -Maximum).Maximum
+	$width  = [Math]::Max(60, $maxLen + 4)
+	$border = '═' * $width
+	Write-Host ''
+	Write-Host "  ╔$border╗" -ForegroundColor $Color
+	foreach ($line in $Lines) {
+		$padded = ' ' + $line.PadRight($width - 1)
+		Write-Host "  ║$padded║" -ForegroundColor $Color
+	}
+	Write-Host "  ╚$border╝" -ForegroundColor $Color
+	Write-Host ''
+}
+
+function Write-Rule {
+	param([string]$Title = '', [int]$Width = 62, [ConsoleColor]$BarColor = 'DarkGray', [ConsoleColor]$TitleColor = 'Cyan')
+	if (-not [string]::IsNullOrEmpty($Title)) {
+		Write-Host ''
+		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
+		Write-Host "  $Title" -ForegroundColor $TitleColor
+		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
+	} else {
+		Write-Host ''
+		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
+		Write-Host ''
+	}
+}
+
+function Write-CheckStart {
+	param([string]$Name, [int]$Indent = 4)
+	$script:_checkLabel = (' ' * $Indent) + $Name + ' = '
+	Write-Host "$($script:_checkLabel)Running..." -ForegroundColor DarkCyan
+}
+
+function Write-CheckResult {
+	param(
+		[ValidateSet('Success', 'Skipped', 'Failed')]
+		[string]$Status,
+		[string]$Detail = ''
+	)
+	$color = switch ($Status) {
+		'Success' { 'Green'      }
+		'Skipped' { 'DarkYellow' }
+		'Failed'  { 'Red'        }
+	}
+	$suffix = if ($Detail) { "  ($Detail)" } else { '' }
+	Write-Host "$($script:_checkLabel)$Status$suffix" -ForegroundColor $color
+}
+
 try {
 	# Detect whether we are running as SYSTEM or a machine account (e.g. via Azure Run Command).
 	# In that context, per-user checks (HKCU/HKEY_USERS, gpresult user RSoP) are meaningless.
@@ -2291,24 +2371,91 @@ try {
 
 	$script:PrimaryApplicationConfig = Get-PrimaryApplicationConfig -ConfigPath (Get-PrimaryApplicationConfigPath)
 	$customerCode = Get-CustomerAbbreviation -Value $CustomerAbbreviation
+	$scriptStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+	Write-Banner @(
+		'AVD Discovery  —  Local Host Inventory',
+		'',
+		"Customer  :  $customerCode",
+		"Machine   :  $($env:COMPUTERNAME)",
+		"Account   :  $($script:RunningAsAccount)",
+		"Mode      :  $(if ($script:IsSystemAccountMode) { 'System Account (Run Command)' } else { 'Interactive' })"
+	) -Color Cyan
+
+	Write-Rule 'HOST INVENTORY'
+
+	Write-CheckStart 'Installed Applications'
 	$installedApps = Get-InstalledApplications -PrimaryApplicationsOnlyMode $PrimaryApplicationsOnly.IsPresent
+	Write-CheckResult 'Success' "$(@($installedApps).Count) app(s)$(if ($PrimaryApplicationsOnly.IsPresent) { ' (primary only)' })"
+
+	Write-CheckStart 'Machine Details'
 	$machineDetails = Get-MachineDetails
+	Write-CheckResult 'Success' "$($machineDetails.Hostname)  |  $($machineDetails.Manufacturer) $($machineDetails.Model)"
+
+	Write-CheckStart 'Domain / Join State'
 	$joinDiscovery = Get-DomainJoinDiscovery
+	Write-CheckResult 'Success' "Join Type: $($joinDiscovery.JoinType)"
+
+	Write-CheckStart 'FSLogix'
 	$fsLogixDiscovery = Get-FSLogixDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'OneDrive / Folder Redirection'
 	$userProfileExperience = Get-OneDriveAndFolderRedirectionDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'Antivirus'
 	$antivirusDiscovery = Get-AntivirusDiscovery -InstalledApplications $installedApps
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'LAPS'
 	$lapsDiscovery = Get-LapsDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'Intune Enrollment'
 	$intuneEnrollmentDiscovery = Get-IntuneEnrollmentDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'Default File Associations'
 	$defaultFileAssociationDiscovery = Get-DefaultFileAssociationsDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'Outlook Cached Mode'
 	$outlookCachedModeDiscovery = Get-OutlookCachedModeDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'Language Packs'
 	$languagePackDiscovery = Get-LanguagePackDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'Universal Print'
 	$universalPrintDiscovery = Get-UniversalPrintDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'Printers'
 	$printerDiscovery = Get-PrinterDiscovery
+	Write-CheckResult 'Success' "$(@($printerDiscovery).Count) printer(s) found"
+
+	Write-CheckStart 'Time Source'
 	$timeSourceDiscovery = Get-TimeSourceDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'Teams Media Optimisation'
 	$teamsMediaOptimizationDiscovery = Get-TeamsMediaOptimizationDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'RDP Redirection'
 	$rdpRedirectionDiscovery = Get-RdpRedirectionDiscovery
-	$rdpShortpathDiscovery   = Get-RdpShortpathDiscovery
-	$adDependencyDiscovery   = Get-ActiveDirectoryDependencyDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'RDP Shortpath'
+	$rdpShortpathDiscovery = Get-RdpShortpathDiscovery
+	Write-CheckResult 'Success'
+
+	Write-CheckStart 'Active Directory Dependencies'
+	$adDependencyDiscovery = Get-ActiveDirectoryDependencyDiscovery
+	Write-CheckResult 'Success'
+
 	$resolvedOutputDirectory = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path $PSScriptRoot 'vm-discovery' } else { [System.IO.Path]::GetFullPath($OutputDirectory) }
 	$resolvedOutputPath = New-ExportFilePath -Directory $resolvedOutputDirectory -CustomerCode $customerCode -Hostname $machineDetails.Hostname
 	$outputDirectory = Split-Path -Path $resolvedOutputPath -Parent
@@ -2317,13 +2464,28 @@ try {
 		New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 	}
 
+	Write-CheckStart 'Group Policy'
 	$gpResultHtmlPath = if ($NoGpresult.IsPresent) { $null } else { [System.IO.Path]::ChangeExtension($resolvedOutputPath, '.gpresult.html') }
-	$groupPolicyDiscovery = if ($NoGpresult.IsPresent) { $null } else { Get-GroupPolicyDiscovery -OutputPath $gpResultHtmlPath }
+	$groupPolicyDiscovery = if ($NoGpresult.IsPresent) {
+		Write-CheckResult 'Skipped' '-NoGpresult specified'
+		$null
+	} else {
+		$_gp = Get-GroupPolicyDiscovery -OutputPath $gpResultHtmlPath
+		if ($_gp.Succeeded) {
+			Write-CheckResult 'Success' "HTML report: $(Split-Path $gpResultHtmlPath -Leaf)"
+		} else {
+			Write-CheckResult 'Skipped' 'gpresult returned no data'
+		}
+		$_gp
+	}
 
+	Write-Rule 'AVD CONNECTIVITY'
 	$avdConnectivityDiscovery = Get-AvdConnectivityDiscovery
 
 	$exportObject = [PSCustomObject]@{
 		CustomerAbbreviation = $customerCode
+		GeneratedBy          = if ([string]::IsNullOrWhiteSpace($GeneratedBy)) { $null } else { $GeneratedBy }
+		ProjectCode          = if ([string]::IsNullOrWhiteSpace($ProjectCode))  { $null } else { $ProjectCode }
 		CollectedAt          = (Get-Date).ToString('s')
 		CollectionMode       = if ($script:IsSystemAccountMode) { 'SystemAccount' } else { 'Interactive' }
 		RunningAsAccount     = $script:RunningAsAccount
@@ -2357,10 +2519,19 @@ try {
 		ForEach-Object { $_ -replace ':  ', ': ' } |
 		Set-Content -Path $resolvedOutputPath -Encoding UTF8
 
-	Write-Host "Exported $(@($installedApps).Count) applications and host profile data to: $resolvedOutputPath"
+	$_elapsed = $scriptStopwatch.Elapsed
+	$_elapsedStr = if ($_elapsed.TotalMinutes -ge 1) {
+		"$([Math]::Floor($_elapsed.TotalMinutes))m $($_elapsed.Seconds)s"
+	} else { "$([Math]::Round($_elapsed.TotalSeconds, 1))s" }
+
+	Write-Rule -BarColor DarkGray
+	Write-Host "  Discovery complete in $_elapsedStr" -ForegroundColor Green
+	Write-Host "  Applications  :  $(@($installedApps).Count)" -ForegroundColor DarkGray
+	Write-Host "  Output file   :  $resolvedOutputPath" -ForegroundColor Cyan
 	if ($null -ne $groupPolicyDiscovery -and $groupPolicyDiscovery.Succeeded) {
-		Write-Host "Group Policy HTML report exported to: $gpResultHtmlPath"
+		Write-Host "  GP report     :  $gpResultHtmlPath" -ForegroundColor Cyan
 	}
+	Write-Host ''
 }
 catch {
 	$errLocation = if ($_.InvocationInfo) { " [line $($_.InvocationInfo.ScriptLineNumber)]" } else { '' }
