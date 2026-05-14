@@ -146,12 +146,17 @@ function Assert-ScriptIsReadOnly {
 
 function Get-OptionalPropertyValue {
 	param(
-		[Parameter(Mandatory = $true)]
+		[Parameter(Mandatory = $false)]
+		[AllowNull()]
 		[object]$Object,
 
 		[Parameter(Mandatory = $true)]
 		[string]$PropertyName
 	)
+
+	if ($null -eq $Object) {
+		return $null
+	}
 
 	$property = $Object.PSObject.Properties[$PropertyName]
 	if ($null -eq $property) {
@@ -1494,15 +1499,15 @@ function Get-AvdConnectivityDiscovery {
 	$results = foreach ($endpoint in $endpoints) {
 		$label = "$($endpoint.Hostname):$($endpoint.Port)"
 		$requiredLabel = if ($endpoint.Required) { '[Required]' } else { '[Optional]' }
-		Write-Host -NoNewline "  $requiredLabel $($endpoint.Category.PadRight(22)) $label ... " -ForegroundColor Gray
+	Write-Host -NoNewline "  $requiredLabel $($endpoint.Category.PadRight(22)) $label ... " -ForegroundColor Gray
 
 		$result = Test-TcpEndpoint -Hostname $endpoint.Hostname -Port $endpoint.Port
 
 		if ($result.Connected) {
-			Write-Host "OK  ($($result.LatencyMs)ms)" -ForegroundColor Green
+			Write-Host (Format-Ansi "`e[92mOK  ($($result.LatencyMs)ms)`e[0m")
 		}
 		else {
-			Write-Host "FAILED  — $($result.Error)" -ForegroundColor Red
+			Write-Host (Format-Ansi "`e[91mFAILED  — $($result.Error)`e[0m")
 		}
 
 		[PSCustomObject]@{
@@ -1523,12 +1528,12 @@ function Get-AvdConnectivityDiscovery {
 	Write-Host ''
 	$_reachStr = "$(@($requiredPassed).Count)/$(@($requiredResults).Count) required endpoints reachable"
 	if (@($requiredFailed).Count -eq 0) {
-		Write-Host "  $_reachStr" -ForegroundColor Green
+		Write-Host (Format-Ansi "  `e[92m$_reachStr`e[0m")
 	} else {
-		Write-Host "  $_reachStr" -ForegroundColor Yellow
-		Write-Host '  Failed required endpoints:' -ForegroundColor DarkYellow
+		Write-Host (Format-Ansi "  `e[93m$_reachStr`e[0m")
+		Write-Host (Format-Ansi "  `e[93mFailed required endpoints:`e[0m")
 		foreach ($failed in $requiredFailed) {
-			Write-Host "    — $($failed.Hostname):$($failed.Port)  ($($failed.Error))" -ForegroundColor Red
+			Write-Host (Format-Ansi "    `e[91m— $($failed.Hostname):$($failed.Port)  ($($failed.Error))`e[0m")
 		}
 	}
 	Write-Host ''
@@ -2066,7 +2071,15 @@ function Get-GroupPolicyDiscovery {
 }
 
 function Get-PrimaryApplicationConfigPath {
-	return Join-Path (Split-Path $PSScriptRoot -Parent) 'config\appExclusions.config.json'
+	$fileName    = 'appExclusions.config.json'
+	$candidates  = @(
+		(Join-Path $PSScriptRoot $fileName),                                      # same folder as script
+		(Join-Path (Split-Path $PSScriptRoot -Parent) "config\$fileName")         # canonical repo layout
+	)
+	foreach ($path in $candidates) {
+		if (Test-Path -Path $path) { return $path }
+	}
+	return $candidates[0]  # not found — caller will handle the null return from Get-PrimaryApplicationConfig
 }
 
 function Get-PrimaryApplicationConfig {
@@ -2076,7 +2089,7 @@ function Get-PrimaryApplicationConfig {
 	)
 
 	if (-not (Test-Path -Path $ConfigPath)) {
-		throw "Primary application config file not found: $ConfigPath"
+		return $null
 	}
 
 	$config = Get-Content -Path $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -2143,6 +2156,10 @@ function Test-PrimaryApplication {
 
 	if ([string]::IsNullOrWhiteSpace($name)) {
 		return $false
+	}
+
+	if ($null -eq $script:PrimaryApplicationConfig) {
+		return $true  # no config loaded — include all applications
 	}
 
 	$namePatterns = $script:PrimaryApplicationConfig.PrimaryApplicationFilters.NamePatterns
@@ -2580,61 +2597,153 @@ function New-ExportFilePath {
 # Console output helpers
 # ------------------------------------------------------------------
 
-$script:_checkLabel = ''
+$script:_checkLabel   = ''
+$script:_ansiSupported = $host.Name -notmatch 'ISE'
+
+function Format-Ansi {
+	param([string]$Text)
+	if ($script:_ansiSupported) { return $Text }
+	return ($Text -replace "`e\[[0-9;]*[mK]", '')
+}
 
 function Write-Banner {
-	param([string[]]$Lines, [ConsoleColor]$Color = 'Cyan')
+	param([string[]]$Lines)
 	$maxLen = ($Lines | Measure-Object -Property Length -Maximum).Maximum
 	$width  = [Math]::Max(60, $maxLen + 4)
 	$border = '═' * $width
 	Write-Host ''
-	Write-Host "  ╔$border╗" -ForegroundColor $Color
+	Write-Host (Format-Ansi "  `e[1m`e[96m╔$border╗`e[0m")
 	foreach ($line in $Lines) {
 		$padded = ' ' + $line.PadRight($width - 1)
-		Write-Host "  ║$padded║" -ForegroundColor $Color
+		Write-Host (Format-Ansi "  `e[96m║`e[0m`e[97m$padded`e[0m`e[96m║`e[0m")
 	}
-	Write-Host "  ╚$border╝" -ForegroundColor $Color
+	Write-Host (Format-Ansi "  `e[1m`e[96m╚$border╝`e[0m")
 	Write-Host ''
 }
 
 function Write-Rule {
-	param([string]$Title = '', [int]$Width = 62, [ConsoleColor]$BarColor = 'DarkGray', [ConsoleColor]$TitleColor = 'Cyan')
+	param([string]$Title = '', [int]$Width = 62)
 	if (-not [string]::IsNullOrEmpty($Title)) {
 		Write-Host ''
-		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
-		Write-Host "  $Title" -ForegroundColor $TitleColor
-		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
+		Write-Host (Format-Ansi "  `e[90m$('─' * $Width)`e[0m")
+		Write-Host (Format-Ansi "  `e[1m`e[96m$Title`e[0m")
+		Write-Host (Format-Ansi "  `e[90m$('─' * $Width)`e[0m")
 	} else {
 		Write-Host ''
-		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
+		Write-Host (Format-Ansi "  `e[90m$('─' * $Width)`e[0m")
 		Write-Host ''
 	}
 }
 
+# Shared state for the background spinner — accessed by both the main thread and the runspace.
+$script:_spinnerState = [hashtable]::Synchronized(@{
+	Active   = $false
+	Activity = 'AVD Session Host Audit'
+	Status   = ''
+	Pct      = -1
+	Run      = $false
+	Lock     = [System.Threading.SemaphoreSlim]::new(1, 1)
+})
+$script:_spinnerJob = $null
+
+function Start-SpinnerRunspace {
+	if ($script:_spinnerJob) { return }  # already running
+	$state       = $script:_spinnerState
+	$state.Run   = $true
+	$rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+	$rs.Open()
+	$rs.SessionStateProxy.SetVariable('_st', $state)
+	$ps = [System.Management.Automation.PowerShell]::Create()
+	$ps.Runspace = $rs
+	[void]$ps.AddScript({
+		$frames = @('|', '/', '-', '\')
+		$idx    = 0
+		$purple = "`e[95m"; $bold = "`e[1m"; $dim = "`e[2m"; $reset = "`e[0m"
+		while ($_st.Run) {
+			if (-not $_st.Active) { Start-Sleep -Milliseconds 50; continue }
+			$s   = $frames[$idx % 4]; $idx++
+			$act = $_st.Activity; $sts = $_st.Status; $pct = $_st.Pct
+			$barStr = ''
+			if ($pct -ge 0) {
+				$w = 20; $f = [Math]::Min([int]($pct / 100.0 * $w), $w)
+				$barStr = "  $dim[$reset$purple$('█' * $f)$dim$('░' * ($w - $f))]$reset  $pct%"
+			}
+			$line    = "$purple$bold $s  $act$reset  $dim$sts$reset$barStr"
+			if ($_st.Lock.Wait(50)) {
+				try     { [Console]::Write("`r$line`e[K") }
+				finally { [void]$_st.Lock.Release() }
+			}
+			Start-Sleep -Milliseconds 100
+		}
+	})
+	$script:_spinnerJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+}
+
+function Stop-SpinnerRunspace {
+	if (-not $script:_spinnerJob) { return }
+	$script:_spinnerState.Active = $false
+	$script:_spinnerState.Run    = $false
+	try { [void]$script:_spinnerJob.PS.EndInvoke($script:_spinnerJob.Handle) } catch {}
+	$script:_spinnerJob.PS.Dispose()
+	$script:_spinnerJob.RS.Dispose()
+	$script:_spinnerJob = $null
+}
+
+function Write-SpinnerLine {
+	# Not used in this script but kept for parity with the metrics script
+	param([string]$Status, [int]$Pct = -1)
+	$script:_spinnerState.Status = $Status
+	if ($Pct -ge 0) { $script:_spinnerState.Pct = $Pct }
+}
+
+function Clear-SpinnerLine {
+	Stop-SpinnerRunspace
+	if ($script:_ansiSupported) { [Console]::Write("`r`e[K") }
+}
+
 function Write-CheckStart {
 	param([string]$Name, [int]$Indent = 4)
-	$script:_checkLabel = (' ' * $Indent) + $Name + ' = '
-	if ($script:_progressTotal -gt 0) {
+	$script:_checkLabel = (' ' * $Indent) + $Name.PadRight(30) + '  '
+	if ($script:_progressTotal -gt 0 -and $script:_ansiSupported) {
 		$_pct = [Math]::Min([int](($script:_progressStep / $script:_progressTotal) * 100), 100)
-		Write-Progress -Activity 'AVD Session Host Audit' -Status $Name -PercentComplete $_pct
+		$script:_spinnerState.Status   = $Name
+		$script:_spinnerState.Pct      = $_pct
+		$script:_spinnerState.Active   = $true
+		Start-SpinnerRunspace
 	}
 }
 
 function Write-CheckResult {
 	param(
-		[ValidateSet('Success', 'Skipped', 'Failed')]
+		[ValidateSet('Success', 'Skipped', 'Failed', 'Info')]
 		[string]$Status,
 		[string]$Detail = ''
 	)
-	$color = switch ($Status) {
-		'Success' { 'Green'      }
-		'Skipped' { 'DarkYellow' }
-		'Failed'  { 'Red'        }
+	$ansiColor = switch ($Status) {
+		'Success' { "`e[92m"  }  # Bright green
+		'Skipped' { "`e[93m"  }  # Bright yellow
+		'Failed'  { "`e[91m"  }  # Bright red
+		'Info'    { "`e[90m"  }  # Dark gray
 	}
 	$suffix = if ($Detail) { "  ($Detail)" } else { '' }
-	Write-Host "$($script:_checkLabel)$Status$suffix" -ForegroundColor $color
-	if ($script:_progressTotal -gt 0) {
+	if ($script:_progressTotal -gt 0 -and $script:_ansiSupported) {
+		$script:_spinnerState.Active = $false  # pause spinner between checks
+		[void]$script:_spinnerState.Lock.Wait()  # wait for any in-flight frame to finish
+		try {
+			[Console]::Write("`r`e[K")
+			[Console]::WriteLine("$ansiColor$($script:_checkLabel)$Status$suffix`e[0m")
+		} finally {
+			[void]$script:_spinnerState.Lock.Release()
+		}
 		$script:_progressStep++
+	} else {
+		$color = switch ($Status) {
+			'Success' { 'Green'   }
+			'Skipped' { 'Yellow'  }
+			'Failed'  { 'Red'     }
+			'Info'    { 'DarkGray'}
+		}
+		Write-Host "$($script:_checkLabel)$Status$suffix" -ForegroundColor $color
 	}
 }
 
@@ -2658,7 +2767,7 @@ try {
 		"Machine   :  $($env:COMPUTERNAME)",
 		"Account   :  $($script:RunningAsAccount)",
 		"Mode      :  $(if ($script:IsSystemAccountMode) { 'System Account (Run Command)' } else { 'Interactive' })"
-	) -Color Cyan
+	)
 
 	$script:_progressStep  = 0
 	$script:_progressTotal = 20
@@ -2704,7 +2813,7 @@ try {
 
 	Write-CheckStart 'Active Directory Dependencies'
 	$adDependencyDiscovery = Get-ActiveDirectoryDependencyDiscovery
-	$_adDetail = "Services: $($adDependencyDiscovery.DomainServiceCount)  |  Tasks: $($adDependencyDiscovery.DomainScheduledTaskCount)  |  ODBC: $($adDependencyDiscovery.DomainOdbcSourceCount)  |  Config Files: $($adDependencyDiscovery.ConfigFileReferenceCount)"
+	$_adDetail = "Services: $($adDependencyDiscovery.DomainServiceCount)  |  Tasks: $($adDependencyDiscovery.DomainScheduledTaskCount)  |  ODBC: $($adDependencyDiscovery.DomainOdbcSourceCount)  |  AD Port Connections: $($adDependencyDiscovery.AdPortConnectionCount)  |  Config Files: $($adDependencyDiscovery.ConfigFileReferenceCount)"
 	Write-CheckResult 'Success' $_adDetail
 
 	Write-CheckStart 'FSLogix'
@@ -2774,7 +2883,7 @@ try {
 		$_gp
 	}
 
-	Write-Progress -Activity 'AVD Session Host Audit' -Completed
+	Clear-SpinnerLine
 
 	Write-Rule 'AVD CONNECTIVITY'
 	$avdConnectivityDiscovery = if ($SkipConnectivityChecks.IsPresent) {
@@ -2828,8 +2937,8 @@ try {
 		"$([Math]::Floor($_elapsed.TotalMinutes))m $($_elapsed.Seconds)s"
 	} else { "$([Math]::Round($_elapsed.TotalSeconds, 1))s" }
 
-	Write-Rule -BarColor DarkGray
-	Write-Host "  Discovery complete in $_elapsedStr" -ForegroundColor Green
+	Write-Rule
+	Write-Host (Format-Ansi "  `e[92mDiscovery complete in $_elapsedStr`e[0m")
 	Write-Host "  Applications  :  $(@($installedApps).Count)" -ForegroundColor DarkGray
 	Write-Host "  Output file   :  $resolvedOutputPath" -ForegroundColor Cyan
 	if ($null -ne $groupPolicyDiscovery -and $groupPolicyDiscovery.Succeeded) {

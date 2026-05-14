@@ -336,30 +336,30 @@ function New-ExportFilePath {
 $script:_checkLabel = ''
 
 function Write-Banner {
-	param([string[]]$Lines, [ConsoleColor]$Color = 'Cyan')
+	param([string[]]$Lines)
 	$maxLen = ($Lines | Measure-Object -Property Length -Maximum).Maximum
 	$width  = [Math]::Max(64, $maxLen + 4)
 	$border = '═' * $width
 	Write-Host ''
-	Write-Host "  ╔$border╗" -ForegroundColor $Color
+	Write-Host "  `e[1m`e[96m╔$border╗`e[0m"
 	foreach ($line in $Lines) {
 		$padded = ' ' + $line.PadRight($width - 1)
-		Write-Host "  ║$padded║" -ForegroundColor $Color
+		Write-Host "  `e[96m║`e[0m`e[97m$padded`e[0m`e[96m║`e[0m"
 	}
-	Write-Host "  ╚$border╝" -ForegroundColor $Color
+	Write-Host "  `e[1m`e[96m╚$border╝`e[0m"
 	Write-Host ''
 }
 
 function Write-Rule {
-	param([string]$Title = '', [int]$Width = 66, [ConsoleColor]$BarColor = 'DarkGray', [ConsoleColor]$TitleColor = 'Cyan')
+	param([string]$Title = '', [int]$Width = 66)
 	if (-not [string]::IsNullOrEmpty($Title)) {
 		Write-Host ''
-		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
-		Write-Host "  $Title" -ForegroundColor $TitleColor
-		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
+		Write-Host "  `e[90m$('─' * $Width)`e[0m"
+		Write-Host "  `e[1m`e[96m$Title`e[0m"
+		Write-Host "  `e[90m$('─' * $Width)`e[0m"
 	} else {
 		Write-Host ''
-		Write-Host "  $('─' * $Width)" -ForegroundColor $BarColor
+		Write-Host "  `e[90m$('─' * $Width)`e[0m"
 		Write-Host ''
 	}
 }
@@ -368,36 +368,123 @@ function Write-PoolHeader {
 	param([int]$Index, [int]$Total, [PSCustomObject]$Pool)
 	$bar = '─' * 66
 	Write-Host ''
-	Write-Host "  $bar" -ForegroundColor DarkGray
-	Write-Host "  HOST POOL [$Index/$Total]  $($Pool.Name)" -ForegroundColor Cyan
-	Write-Host "  Subscription : $($Pool.SubscriptionName)  |  Region : $($Pool.Location)  |  Type : $($Pool.HostPoolType)" -ForegroundColor DarkGray
-	Write-Host "  $bar" -ForegroundColor DarkGray
+	Write-Host "  `e[90m$bar`e[0m"
+	Write-Host "  `e[1m`e[97mHOST POOL [$Index/$Total]`e[0m  `e[96m$($Pool.Name)`e[0m"
+	Write-Host "  `e[90mSubscription : $($Pool.SubscriptionName)  |  Region : $($Pool.Location)  |  Type : $($Pool.HostPoolType)`e[0m"
+	Write-Host "  `e[90m$bar`e[0m"
+}
+
+# Shared state for the background spinner — accessed by both the main thread and the runspace.
+$script:_progressActivity = 'AVD Metrics Collection'
+$script:_spinnerState = [hashtable]::Synchronized(@{
+	Active   = $false
+	Activity = 'AVD Metrics Collection'
+	Status   = ''
+	Pct      = -1
+	Run      = $false
+	Lock     = [System.Threading.SemaphoreSlim]::new(1, 1)
+})
+$script:_spinnerJob = $null
+
+function Start-SpinnerRunspace {
+	if ($script:_spinnerJob) { return }  # already running
+	$state       = $script:_spinnerState
+	$state.Run   = $true
+	$rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+	$rs.Open()
+	$rs.SessionStateProxy.SetVariable('_st', $state)
+	$ps = [System.Management.Automation.PowerShell]::Create()
+	$ps.Runspace = $rs
+	[void]$ps.AddScript({
+		$frames = @('|', '/', '-', '\')
+		$idx    = 0
+		$purple = "`e[95m"; $bold = "`e[1m"; $dim = "`e[2m"; $reset = "`e[0m"
+		while ($_st.Run) {
+			if (-not $_st.Active) { Start-Sleep -Milliseconds 50; continue }
+			$s   = $frames[$idx % 4]; $idx++
+			$act = $_st.Activity; $sts = $_st.Status; $pct = $_st.Pct
+			$barStr = ''
+			if ($pct -ge 0) {
+				$w = 20; $f = [Math]::Min([int]($pct / 100.0 * $w), $w)
+				$barStr = "  $dim[$reset$purple$('█' * $f)$dim$('░' * ($w - $f))]$reset  $pct%"
+			}
+			$line    = "$purple$bold $s  $act$reset  $dim$sts$reset$barStr"
+			if ($_st.Lock.Wait(50)) {
+				try     { [Console]::Write("`r$line`e[K") }
+				finally { [void]$_st.Lock.Release() }
+			}
+			Start-Sleep -Milliseconds 100
+		}
+	})
+	$script:_spinnerJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+}
+
+function Stop-SpinnerRunspace {
+	if (-not $script:_spinnerJob) { return }
+	$script:_spinnerState.Active = $false
+	$script:_spinnerState.Run    = $false
+	try { [void]$script:_spinnerJob.PS.EndInvoke($script:_spinnerJob.Handle) } catch {}
+	$script:_spinnerJob.PS.Dispose()
+	$script:_spinnerJob.RS.Dispose()
+	$script:_spinnerJob = $null
+}
+
+function Write-SpinnerLine {
+	# Updates the displayed status without interrupting the running spinner
+	param([string]$Status, [int]$Pct = -1)
+	$script:_spinnerState.Status = $Status
+	if ($Pct -ge 0) { $script:_spinnerState.Pct = $Pct }
+}
+
+function Clear-SpinnerLine {
+	Stop-SpinnerRunspace
+	[Console]::Write("`r`e[K")
 }
 
 function Write-CheckStart {
 	param([string]$Name, [int]$Indent = 6)
-	$script:_checkLabel = (' ' * $Indent) + $Name + ' = '
+	$script:_checkLabel = (' ' * $Indent) + $Name.PadRight(26) + '  '
 	if ($script:_progressTotal -gt 0) {
 		$_pct = [Math]::Min([int](($script:_progressStep / $script:_progressTotal) * 100), 100)
-		Write-Progress -Activity 'AVD Metrics Collection' -Status $Name -PercentComplete $_pct
+		$script:_spinnerState.Activity = $script:_progressActivity
+		$script:_spinnerState.Status   = $Name
+		$script:_spinnerState.Pct      = $_pct
+		$script:_spinnerState.Active   = $true
+		Start-SpinnerRunspace
 	}
 }
 
 function Write-CheckResult {
 	param(
-		[ValidateSet('Success', 'Skipped', 'Failed')]
+		[ValidateSet('Success', 'Skipped', 'Failed', 'Info')]
 		[string]$Status,
 		[string]$Detail = ''
 	)
-	$color = switch ($Status) {
-		'Success' { 'Green'      }
-		'Skipped' { 'DarkYellow' }
-		'Failed'  { 'Red'        }
+	$ansiColor = switch ($Status) {
+		'Success' { "`e[92m"  }  # Bright green
+		'Skipped' { "`e[93m"  }  # Bright yellow
+		'Failed'  { "`e[91m"  }  # Bright red
+		'Info'    { "`e[90m"  }  # Dark gray
 	}
 	$suffix = if ($Detail) { "  ($Detail)" } else { '' }
-	Write-Host "$($script:_checkLabel)$Status$suffix" -ForegroundColor $color
 	if ($script:_progressTotal -gt 0) {
+		$script:_spinnerState.Active = $false  # pause spinner between checks
+		[void]$script:_spinnerState.Lock.Wait()  # wait for any in-flight frame to finish
+		try {
+			[Console]::Write("`r`e[K")
+			[Console]::WriteLine("$ansiColor$($script:_checkLabel)$Status$suffix`e[0m")
+		} finally {
+			[void]$script:_spinnerState.Lock.Release()
+		}
 		$script:_progressStep++
+	} else {
+		$color = switch ($Status) {
+			'Success' { 'Green'   }
+			'Skipped' { 'Yellow'  }
+			'Failed'  { 'Red'     }
+			'Info'    { 'DarkGray'}
+		}
+		Write-Host "$($script:_checkLabel)$Status$suffix" -ForegroundColor $color
 	}
 }
 
@@ -2778,10 +2865,11 @@ WVDErrors
 
 		$totalErrors     = if ($topErrors.Count -gt 0) { ($topErrors | Measure-Object -Property Count -Sum).Sum } else { $null }
 		$shortpathErrors = if ($topErrors.Count -gt 0) {
-			($topErrors | Where-Object {
+			$_sp = @($topErrors | Where-Object {
 				$_.Source  -match 'UDP|Shortpath|ICE|TURN|STUN' -or
 				$_.Message -match 'UDP|Shortpath|ICE|TURN|STUN'
-			} | Measure-Object -Property Count -Sum).Sum
+			})
+			if ($_sp.Count -gt 0) { ($_sp | Measure-Object -Property Count -Sum).Sum } else { $null }
 		} else { $null }
 
 		# ----------------------------------------------------------
@@ -2888,7 +2976,7 @@ WVDHostRegistrations
 		}
 
 		$hostRegistrationEvents = if ($hostRegistrationBreakdown.Count -gt 0) {
-			($hostRegistrationBreakdown | Measure-Object -Property RegistrationCount -Sum).Sum
+			$_regSum = 0; foreach ($_r in $hostRegistrationBreakdown) { $_regSum += $_r.RegistrationCount }; $_regSum
 		} else { $null }
 
 		# Summarise registration health in plain English.
@@ -3954,13 +4042,14 @@ function Invoke-HostPoolLocalDiscovery {
 
 	# Collect all running VMs so we can fall back to the next one if a VM's agent is stuck.
 	$_ldActivity = "Local Discovery  ─  $($Pool.Name)"
+	$script:_progressActivity = $_ldActivity
 	$_ldVmTotal  = @($VmResourceIds).Count
 	$_ldVmIdx    = 0
 	$runningVmIds = @()
 	foreach ($vmId in $VmResourceIds) {
 		$candidateName = ($vmId -split '/')[-1]
 		$_ldVmIdx++
-		Write-Progress -Id 1 -ParentId 0 -Activity $_ldActivity -Status "Checking power state: $candidateName ($_ldVmIdx/$_ldVmTotal)"
+		Write-SpinnerLine -Status "Checking power state: $candidateName ($_ldVmIdx/$_ldVmTotal)"
 		Write-Host "    [LocalDiscovery | $($Pool.Name)] Checking power state: $candidateName"
 		$state = Get-VmPowerState -VmResourceId $vmId
 		if ($state -eq 'PowerState/running') {
@@ -4136,7 +4225,7 @@ function Invoke-HostPoolLocalDiscovery {
 	# compresses the output, and writes the base64 payload to a staging file — returning
 	# just the path and size via stdout (stdout itself is limited to the last 4,096 chars).
 	$stdout = $null
-	Write-Progress -Id 1 -ParentId 0 -Activity $_ldActivity -Status "Running discovery on $vmName  (may take 1–3 min)"
+	Write-SpinnerLine -Status "Running discovery on $vmName  (may take 1–3 min)"
 	try {
 		$stdout = Invoke-VmRunCommand -VmResourceId $targetVmId -Script $wrapperLines -Parameters $wrapperParams -TimeoutSeconds $TimeoutSeconds -RunAsCredential $RunAsCredential
 	}
@@ -4217,12 +4306,12 @@ function Invoke-HostPoolLocalDiscovery {
 	# Read the staging file back in chunks, then delete it regardless of success or failure.
 	$b64Payload = $null
 	$_chunkCount = [Math]::Ceiling($fileSize / 3900)
-	Write-Progress -Id 1 -ParentId 0 -Activity $_ldActivity -Status "Retrieving output from $vmName  ($_chunkCount chunk(s))"
+	Write-SpinnerLine -Status "Retrieving output from $vmName  ($_chunkCount chunk(s))"
 	try {
 		$b64Payload = Read-VmFileInChunks -VmResourceId $targetVmId -FilePath $stagingPath -FileLength $fileSize
 	}
 	finally {
-		Write-Progress -Id 1 -ParentId 0 -Activity $_ldActivity -Status "Cleaning up staging file on $vmName"
+		Write-SpinnerLine -Status "Cleaning up staging file on $vmName"
 		Write-Host "    [LocalDiscovery | $vmName] Deleting staging file..."
 		$cleanupLines = @("if (Test-Path '$stagingPath') { Remove-Item -Path '$stagingPath' -Force -ErrorAction SilentlyContinue }")
 		Invoke-VmRunCommand -VmResourceId $targetVmId -Script $cleanupLines -TimeoutSeconds 60 -InitialPollSeconds 3 | Out-Null
@@ -4263,7 +4352,7 @@ function Invoke-HostPoolLocalDiscovery {
 		$gpHtmlSize = ''
 		if ($stdout -match '##HTML##(\d+)##') { $gpHtmlSize = " (HTML: $([Math]::Round([int64]$Matches[1] / 1KB, 1)) KB)" }
 		$_gpChunkCount = [Math]::Ceiling($gpFileSize / 3900)
-		Write-Progress -Id 1 -ParentId 0 -Activity $_ldActivity -Status "Retrieving Group Policy report from $vmName  ($_gpChunkCount chunk(s))"
+		Write-SpinnerLine -Status "Retrieving Group Policy report from $vmName  ($_gpChunkCount chunk(s))"
 		Write-Host "    [LocalDiscovery | $vmName] Retrieving gpresult HTML ($gpFileSize chars)$gpHtmlSize..."
 		$gpB64 = $null
 		try {
@@ -4291,12 +4380,12 @@ function Invoke-HostPoolLocalDiscovery {
 		}
 	}
 	# Success — this VM worked, stop trying others.
-	Write-Progress -Id 1 -Completed
+	Clear-SpinnerLine
 	return
 	}
 
 	# All running VMs exhausted without success
-	Write-Progress -Id 1 -Completed
+	Clear-SpinnerLine
 	Write-Warning "[LocalDiscovery | $($Pool.Name)] All $($runningVmIds.Count) running host(s) failed or had stuck agents — local discovery could not be completed."
 }
 
@@ -4363,7 +4452,7 @@ try {
 		"Host Pools   :  $_poolFilter",
 		"Local Disc   :  $_localDisc",
 		"Output       :  $_outFile"
-	) -Color Cyan
+	)
 
 	$script:_progressStep  = 0
 	$script:_progressTotal = 0  # Set to real value after Host Pools count is known
@@ -4471,6 +4560,7 @@ try {
 	$poolIndex   = 0
 	$poolMetrics = foreach ($pool in $hostPools) {
 		$poolIndex++
+		$script:_progressActivity = "Host Pool Checks  [$poolIndex/$($hostPools.Count)]  $($pool.Name)"
 		Write-PoolHeader -Index $poolIndex -Total $hostPools.Count -Pool $pool
 		Set-AzContext -SubscriptionId $pool.SubscriptionId -WarningAction SilentlyContinue | Out-Null
 
@@ -4514,7 +4604,11 @@ try {
 
 		Write-CheckStart 'Registration Token'
 		$regToken = Get-HostPoolRegistrationToken -HostPool $pool
-		Write-CheckResult 'Success' "Active: $($regToken.HasActiveToken)"
+		if ($regToken.HasActiveToken) {
+			Write-CheckResult 'Success' "Active — expires $($regToken.ExpiresAt)"
+		} else {
+			Write-CheckResult 'Info' 'None — normal for steady-state pools'
+		}
 
 		Write-CheckStart 'Backup Info'
 		$backupInfo = if ($pool.HostPoolType -eq 'Personal') {
@@ -4561,7 +4655,7 @@ try {
 		Write-CheckResult $_diagResult "Status: $($diagInsights.DiagnosticsStatus)"
 
 		if ($RunLocalDiscovery.IsPresent -and @($infra.VmResourceIds).Count -gt 0) {
-			Write-Rule 'Local Discovery' -TitleColor DarkCyan
+			Write-Rule 'Local Discovery'
 			Invoke-HostPoolLocalDiscovery -Pool $pool -VmResourceIds @($infra.VmResourceIds) -CustomerCode $customerCode -VmDiscoveryDirectory $resolvedVmDiscoveryDirectory -GitHubRawBaseUrl $gitHubRawBaseUrl -InlineLocalScript:$InlineLocalScript -TimeoutSeconds $LocalDiscoveryTimeout -RunAsCredential $runAsCredential
 		} elseif ($RunLocalDiscovery.IsPresent) {
 			Write-CheckStart 'Local Discovery'
@@ -4712,9 +4806,12 @@ try {
 		}
 	}
 
-	Write-Progress -Activity 'AVD Metrics Collection' -Completed
-
 	# ── Storage Account FSLogix scan ─────────────────────────────────────────
+	# Stop the pool-phase spinner and reset counters — storage scan has its own checks
+	# and doesn't share the pool progress total.
+	Stop-SpinnerRunspace
+	$script:_progressStep  = 0
+	$script:_progressTotal = 0
 	$storageResults = @()
 	if ($PSBoundParameters.ContainsKey('ScanStorageAccounts')) {
 		# Resolve the list of names: outer @() prevents pipeline unwrapping of single-element arrays
@@ -4745,13 +4842,10 @@ try {
 					$_saName = $_saEntry.Resource.name
 					$_bar    = '─' * 66
 					Write-Host ''
-					Write-Host "  $_bar" -ForegroundColor DarkGray
-					Write-Host "  STORAGE ACCOUNT [$_saIdx/$($_saResources.Count)]  $_saName" -ForegroundColor Cyan
-					Write-Host "  Subscription : $($_saEntry.SubscriptionName)  |  RG : $($_saEntry.ResourceGroup)  |  Region : $($_saEntry.Resource.location)" -ForegroundColor DarkGray
-					Write-Host "  $_bar" -ForegroundColor DarkGray
-
-					Set-AzContext -SubscriptionId $_saEntry.SubscriptionId -WarningAction SilentlyContinue | Out-Null
-
+					Write-Host "  `e[90m$_bar`e[0m"
+					Write-Host "  `e[1m`e[97mSTORAGE ACCOUNT [$_saIdx/$($_saResources.Count)]`e[0m  `e[96m$_saName`e[0m"
+					Write-Host "  `e[90mSubscription : $($_saEntry.SubscriptionName)  |  RG : $($_saEntry.ResourceGroup)  |  Region : $($_saEntry.Resource.location)`e[0m"
+					Write-Host "  `e[90m$_bar`e[0m"
 					Write-CheckStart 'Storage Account Details'
 					$_saInfo = Get-StorageAccountFSLogixInfo -StorageAccount $_saEntry -VaultCache $vaultCache
 					$_skuStr = "$($_saInfo.Sku)  ($($_saInfo.ReplicationType))"
@@ -4786,13 +4880,21 @@ try {
 						Write-Host ''
 						Write-Host '      File Shares:' -ForegroundColor DarkGray
 						foreach ($_share in $_saInfo.FileShares) {
-							$_usedStr   = if ($null -ne $_share.UsedSizeGb)    { "$($_share.UsedSizeGb) GB used ($($_share.UsedPercent)%)" } elseif (-not $_share.UsageStatsAvailable) { 'usage stats unavailable (Premium tier)' } else { 'usage N/A' }
-							$_provStr   = if ($null -ne $_share.ProvisionedSizeGb) { "$($_share.ProvisionedSizeGb) GB provisioned" } else { 'size N/A' }
-							$_iopsStr   = if ($null -ne $_share.ProvisionedIops) { "  |  IOPS: $($_share.ProvisionedIops)" } else { '' }
-							$_bwStr     = if ($null -ne $_share.ProvisionedBandwidthMiBps) { "  |  BW: $($_share.ProvisionedBandwidthMiBps) MiB/s" } else { '' }
-							$_bakStr    = if ($_share.BackupEnabled) { '  |  Backup: ✓' } else { '  |  Backup: ✗' }
-							$_tierLabel = if ($_share.Tier) { " [$($_share.Tier)]" } else { '' }
-							Write-Host "        $($_share.Name)$_tierLabel  —  $_provStr  |  $_usedStr$_iopsStr$_bwStr$_bakStr" -ForegroundColor Gray
+							$_tierLabel = if ($_share.Tier) { " `e[90m[$($_share.Tier)]`e[0m" } else { '' }
+							Write-Host "        `e[97m$($_share.Name)`e[0m$_tierLabel"
+							$_col = '          '
+							$_provStr = if ($null -ne $_share.ProvisionedSizeGb) { "$($_share.ProvisionedSizeGb) GB" } else { 'N/A' }
+							$_usedStr = if ($null -ne $_share.UsedSizeGb) { "$($_share.UsedSizeGb) GB ($($_share.UsedPercent)% used)" } elseif (-not $_share.UsageStatsAvailable) { 'N/A (Premium tier)' } else { 'N/A' }
+							Write-Host "${_col}`e[90mProvisioned  :`e[0m  $_provStr"
+							Write-Host "${_col}`e[90mUsed         :`e[0m  $_usedStr"
+							if ($null -ne $_share.ProvisionedIops) {
+								Write-Host "${_col}`e[90mIOPS         :`e[0m  $($_share.ProvisionedIops)"
+							}
+							if ($null -ne $_share.ProvisionedBandwidthMiBps) {
+								Write-Host "${_col}`e[90mBandwidth    :`e[0m  $($_share.ProvisionedBandwidthMiBps) MiB/s"
+							}
+							$_bakStr = if ($_share.BackupEnabled) { "`e[92m✓ Enabled`e[0m" } else { "`e[90m✗ Disabled`e[0m" }
+							Write-Host "${_col}`e[90mBackup       :`e[0m  $_bakStr"
 						}
 					}
 
@@ -4855,13 +4957,14 @@ try {
 
 	$exportObject | ConvertTo-Json -Depth 8 | Set-Content -Path $resolvedOutputPath -Encoding UTF8
 
+	Clear-SpinnerLine
 	$_elapsed = $scriptStopwatch.Elapsed
 	$_elapsedStr = if ($_elapsed.TotalMinutes -ge 1) {
 		"$([Math]::Floor($_elapsed.TotalMinutes))m $($_elapsed.Seconds)s"
 	} else { "$([Math]::Round($_elapsed.TotalSeconds, 1))s" }
 
-	Write-Rule -BarColor DarkGray
-	Write-Host "  Collection complete in $_elapsedStr" -ForegroundColor Green
+	Write-Rule
+	Write-Host "  `e[92mCollection complete in $_elapsedStr`e[0m"
 	Write-Host "  Host pools  :  $($hostPools.Count)" -ForegroundColor DarkGray
 	$_readPct  = [Math]::Round($script:armCounts.Read  / 12000 * 100, 1)
 	$_writePct = [Math]::Round($script:armCounts.Write / 1200  * 100, 1)
