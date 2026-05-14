@@ -127,14 +127,14 @@ for the current engagement. When skipped, LicenseSummaryStatus is set to 'Skippe
 and all related fields are empty in the export.
 
 .PARAMETER NoGpresult
-When specified alongside -RunLocalDiscovery, passes -NoGpresult to LocalScript.ps1
+When specified alongside -RunLocalDiscovery, passes -NoGpresult to Invoke-AvdSessionHostAudit.ps1
 so that the gpresult HTML report is not generated on the session host. Useful when
 Group Policy data is not required or when gpresult is known to fail in the target
 environment.
 
 .PARAMETER InlineLocalScript
-When specified alongside -RunLocalDiscovery, embeds LocalScript.ps1 and
-appExclusions.config.json directly into the Run Command payload instead of
+When specified alongside -RunLocalDiscovery, embeds Invoke-AvdSessionHostAudit.ps1 and
+config/appExclusions.config.json directly into the Run Command payload instead of
 downloading them from GitHub on the VM. This avoids the requirement for VMs
 to have outbound HTTPS access to raw.githubusercontent.com, which may be
 blocked by antivirus software, firewalls, or proxy configurations.
@@ -168,28 +168,28 @@ read access to the runCommands resource. Do not use privileged or shared service
 account credentials. Prefer a standard non-admin domain user account.
 
 .PARAMETER GitHubBranch
-The branch name used when downloading LocalScript.ps1 and appExclusions.config.json
+The branch name used when downloading Invoke-AvdSessionHostAudit.ps1 and config/appExclusions.config.json
 from the GitHub repository (https://github.com/wavenetuk/avd-discovery) during
 -RunLocalDiscovery execution. Defaults to 'main'. Use a feature branch name when
 testing changes that have not yet been merged.
 
 .EXAMPLE
-.\AzureManagementPlane.ps1
+.\Invoke-AvdMetricsCollection.ps1
 
 .EXAMPLE
-.\AzureManagementPlane.ps1 -CustomerAbbreviation kcr -LookbackDays 14 -ExcludeWeekends
+.\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation kcr -LookbackDays 14 -ExcludeWeekends
 
 .EXAMPLE
-.\AzureManagementPlane.ps1 -CustomerAbbreviation kcr -LookbackDays 14 -PeakHoursOnly -UtcOffsetHours 1
+.\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation kcr -LookbackDays 14 -PeakHoursOnly -UtcOffsetHours 1
 
 .EXAMPLE
-.\AzureManagementPlane.ps1 -CustomerAbbreviation kcr -LookbackDays 14 -PeakHoursOnly -ExcludeWeekends -UtcOffsetHours 1
+.\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation kcr -LookbackDays 14 -PeakHoursOnly -ExcludeWeekends -UtcOffsetHours 1
 
 .EXAMPLE
-.\AzureManagementPlane.ps1 -CustomerAbbreviation kcr -SubscriptionId '00000000-0000-0000-0000-000000000000' -OutputDirectory .\exports
+.\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation kcr -SubscriptionId '00000000-0000-0000-0000-000000000000' -OutputDirectory .\exports
 
 .EXAMPLE
-.\AzureManagementPlane.ps1 -CustomerAbbreviation kcr -RunLocalDiscovery -InlineLocalScript -NoGpresult
+.\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation kcr -RunLocalDiscovery -InlineLocalScript -NoGpresult
 Runs local discovery with the script files embedded directly in the Run Command payload,
 bypassing the need for VMs to reach raw.githubusercontent.com. Useful when AV or
 firewalls block outbound HTTPS from session hosts.
@@ -3672,24 +3672,24 @@ function Read-VmFileInChunks {
 function Invoke-HostPoolLocalDiscovery {
 	<#
 	.SYNOPSIS
-	Finds the first running session host VM in a host pool, executes LocalScript.ps1
+	Finds the first running session host VM in a host pool, executes Invoke-AvdSessionHostAudit.ps1
 	on it via the Azure VM Run Command API, and saves the resulting JSON to the
-	vm-discovery output directory. Non-fatal — logs a warning and continues on failure.
+	output/vm-discovery directory. Non-fatal — logs a warning and continues on failure.
 
 	.DESCRIPTION
 	A small bootstrap script is sent as the Run Command payload. By default it downloads
-	LocalScript.ps1 and appExclusions.config.json directly from the GitHub repository
+	Invoke-AvdSessionHostAudit.ps1 and config/appExclusions.config.json directly from the GitHub repository
 	(raw.githubusercontent.com) using Invoke-WebRequest.
 
 	When -InlineLocalScript is specified, the bootstrap instead carries both files
 	embedded as base64-encoded strings and writes them to a temp directory on the VM,
 	eliminating the need for outbound HTTPS access to GitHub.
 
-	In either mode, the bootstrap executes LocalScript.ps1 into a temp directory, writes
+	In either mode, the bootstrap executes Invoke-AvdSessionHostAudit.ps1 into a temp directory, writes
 	the GZip-compressed base64-encoded JSON to a staging file, and returns just the file
 	path and size via stdout. The caller then reads the staging file back in fixed-size
 	chunks (Run Command stdout is limited to the last 4,096 chars by the Azure VM Agent),
-	assembles the payload, decodes it, and writes it to the vm-discovery folder. The
+	assembles the payload, decodes it, and writes it to the output/vm-discovery folder. The
 	staging file is deleted after retrieval.
 
 	Requires the authenticated account to have 'Virtual Machine Contributor' or
@@ -3748,8 +3748,8 @@ function Invoke-HostPoolLocalDiscovery {
 
 	Write-Host "    [LocalDiscovery | $($Pool.Name)] Found $($runningVmIds.Count) running host(s)."
 
-	$scriptUrl       = "$GitHubRawBaseUrl/LocalScript.ps1"
-	$configUrl       = "$GitHubRawBaseUrl/appExclusions.config.json"
+	$scriptUrl       = "$GitHubRawBaseUrl/scripts/Invoke-AvdSessionHostAudit.ps1"
+	$configUrl       = "$GitHubRawBaseUrl/config/appExclusions.config.json"
 	$custCodeEscaped = $CustomerCode -replace "'", "''"
 
 	# --- Build the wrapper script (same for all VMs in this pool) ---
@@ -3758,15 +3758,15 @@ function Invoke-HostPoolLocalDiscovery {
 
 	if ($InlineLocalScript.IsPresent) {
 		# --- Inline mode: embed the script files directly in the Run Command payload ---
-		$localScriptPath = Join-Path $PSScriptRoot 'LocalScript.ps1'
-		$localConfigPath = Join-Path $PSScriptRoot 'appExclusions.config.json'
-		if (-not (Test-Path $localScriptPath)) { Write-Warning "[LocalDiscovery | $($Pool.Name)] LocalScript.ps1 not found at '$localScriptPath' — cannot inline."; return }
-		if (-not (Test-Path $localConfigPath)) { Write-Warning "[LocalDiscovery | $($Pool.Name)] appExclusions.config.json not found at '$localConfigPath' — cannot inline."; return }
+		$localScriptPath = Join-Path $PSScriptRoot 'Invoke-AvdSessionHostAudit.ps1'
+		$localConfigPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'config\appExclusions.config.json'
+		if (-not (Test-Path $localScriptPath)) { Write-Warning "[LocalDiscovery | $($Pool.Name)] Invoke-AvdSessionHostAudit.ps1 not found at '$localScriptPath' — cannot inline."; return }
+		if (-not (Test-Path $localConfigPath)) { Write-Warning "[LocalDiscovery | $($Pool.Name)] config\appExclusions.config.json not found at '$localConfigPath' — cannot inline."; return }
 
 		$scriptB64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($localScriptPath))
 		$configB64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($localConfigPath))
 
-		Write-Host "    [LocalDiscovery | $($Pool.Name)] Inline mode — embedding LocalScript.ps1 ($([Math]::Round($scriptB64.Length / 1KB, 1)) KB b64) + config ($([Math]::Round($configB64.Length / 1KB, 1)) KB b64)"
+		Write-Host "    [LocalDiscovery | $($Pool.Name)] Inline mode — embedding Invoke-AvdSessionHostAudit.ps1 ($([Math]::Round($scriptB64.Length / 1KB, 1)) KB b64) + config ($([Math]::Round($configB64.Length / 1KB, 1)) KB b64)"
 
 		# Build the base64 assignment as a concatenation of small chunks rather than
 		# one enormous string literal. PowerShell 5.1 is extremely slow to parse a single
@@ -3788,7 +3788,7 @@ function Invoke-HostPoolLocalDiscovery {
 		$cfgAssignment = Split-Base64ToChunkedAssignment -VarName 'cfgB64' -Base64 $configB64
 
 		# The wrapper decodes the embedded base64 content to files on the VM, then
-		# executes LocalScript.ps1 identically to the GitHub-download path.
+		# executes Invoke-AvdSessionHostAudit.ps1 identically to the GitHub-download path.
 		$wrapperLines = @(
 			$scrAssignment,
 			$cfgAssignment,
@@ -3797,7 +3797,7 @@ function Invoke-HostPoolLocalDiscovery {
 			'try {',
 			'    $id      = [Guid]::NewGuid().ToString("N")',
 			'    $tmp     = Join-Path ([System.IO.Path]::GetTempPath()) "avd-disc-$id"',
-			'    $scrPath = Join-Path $tmp "LocalScript.ps1"',
+			'    $scrPath = Join-Path $tmp "Invoke-AvdSessionHostAudit.ps1"',
 			'    $cfgPath = Join-Path $tmp "appExclusions.config.json"',
 			'    $outDir  = Join-Path $tmp "output"',
 			'    New-Item -ItemType Directory -Path $tmp    -Force | Out-Null',
@@ -3806,7 +3806,7 @@ function Invoke-HostPoolLocalDiscovery {
 			'    [System.IO.File]::WriteAllBytes($cfgPath, [Convert]::FromBase64String($cfgB64))',
 			("    & `$scrPath -CustomerAbbreviation `$cCode -OutputDirectory `$outDir -PrimaryApplicationsOnly$(if ($NoGpresult.IsPresent) { ' -NoGpresult' }) -ErrorAction Stop *>&1 | Out-Null"),
 			'    $jf = Get-ChildItem -Path $outDir -Filter "*.json" -File | Select-Object -First 1',
-			'    if (-not $jf) { throw "No JSON output produced by LocalScript.ps1" }',
+			'    if (-not $jf) { throw "No JSON output produced by Invoke-AvdSessionHostAudit.ps1" }',
 			'    $jb  = [System.IO.File]::ReadAllBytes($jf.FullName)',
 			'    $cms = [System.IO.MemoryStream]::new()',
 			'    $cgz = [System.IO.Compression.GZipStream]::new($cms, [System.IO.Compression.CompressionMode]::Compress)',
@@ -3843,7 +3843,7 @@ function Invoke-HostPoolLocalDiscovery {
 		Write-Host "    [LocalDiscovery | $($Pool.Name)] Fetching script from: $scriptUrl"
 
 		# Bootstrap sent as the Run Command payload. Downloads both files from GitHub then
-		# executes LocalScript.ps1. JSON output is GZip-compressed and base64-encoded so it
+		# executes Invoke-AvdSessionHostAudit.ps1. JSON output is GZip-compressed and base64-encoded so it
 		# travels cleanly through the Run Command stdout channel.
 		$wrapperLines = @(
 			"`$scriptUrl = '$scriptUrl'",
@@ -3854,7 +3854,7 @@ function Invoke-HostPoolLocalDiscovery {
 			'    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12',
 			'    $id      = [Guid]::NewGuid().ToString("N")',
 			'    $tmp     = Join-Path ([System.IO.Path]::GetTempPath()) "avd-disc-$id"',
-			'    $scrPath = Join-Path $tmp "LocalScript.ps1"',
+			'    $scrPath = Join-Path $tmp "Invoke-AvdSessionHostAudit.ps1"',
 			'    $cfgPath = Join-Path $tmp "appExclusions.config.json"',
 			'    $outDir  = Join-Path $tmp "output"',
 			'    New-Item -ItemType Directory -Path $tmp    -Force | Out-Null',
@@ -3863,7 +3863,7 @@ function Invoke-HostPoolLocalDiscovery {
 			'    Invoke-WebRequest -Uri $configUrl -OutFile $cfgPath -UseBasicParsing',
 			("    & `$scrPath -CustomerAbbreviation `$cCode -OutputDirectory `$outDir -PrimaryApplicationsOnly$(if ($NoGpresult.IsPresent) { ' -NoGpresult' }) -ErrorAction Stop *>&1 | Out-Null"),
 			'    $jf = Get-ChildItem -Path $outDir -Filter "*.json" -File | Select-Object -First 1',
-			'    if (-not $jf) { throw "No JSON output produced by LocalScript.ps1" }',
+			'    if (-not $jf) { throw "No JSON output produced by Invoke-AvdSessionHostAudit.ps1" }',
 			'    $jb  = [System.IO.File]::ReadAllBytes($jf.FullName)',
 			'    $cms = [System.IO.MemoryStream]::new()',
 			'    $cgz = [System.IO.Compression.GZipStream]::new($cms, [System.IO.Compression.CompressionMode]::Compress)',
@@ -3905,7 +3905,7 @@ function Invoke-HostPoolLocalDiscovery {
 		$vmName = ($targetVmId -split '/')[-1]
 		Write-Host "    [LocalDiscovery | $vmName] Target VM selected$(if ($null -ne $RunAsCredential) { " — run-as: $($RunAsCredential.Username)" })"
 
-	# Run the bootstrap wrapper. It executes LocalScript.ps1 (downloaded or inlined),
+	# Run the bootstrap wrapper. It executes Invoke-AvdSessionHostAudit.ps1 (downloaded or inlined),
 	# compresses the output, and writes the base64 payload to a staging file — returning
 	# just the path and size via stdout (stdout itself is limited to the last 4,096 chars).
 	$stdout = $null
@@ -3935,13 +3935,13 @@ function Invoke-HostPoolLocalDiscovery {
 				'    • A network policy blocking the Azure wireserver (168.63.129.16)',
 				'    • A stuck VM agent goal-state queue (restart WindowsAzureGuestAgent)',
 				'',
-				'  RECOMMENDED: Cancel (Ctrl+C) and run LocalScript.ps1 directly on the',
+				'  RECOMMENDED: Cancel (Ctrl+C) and run Invoke-AvdSessionHostAudit.ps1 directly on the',
 				'  session host. Access the VM using any of the following methods:',
 				'',
 				"    1. RDP or Azure Bastion to:         $vmName",
 				"    2. RMM tool or LogicMonitor to:     $vmName",
 				'',
-				'    Then run: .\LocalScript.ps1 -CustomerAbbreviation <code>',
+				'    Then run: .\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation <code>',
 				'',
 				'  Continuing to try remaining hosts — press Ctrl+C to cancel.',
 				''
@@ -3962,7 +3962,7 @@ function Invoke-HostPoolLocalDiscovery {
 
 	# Script-level error reported by the wrapper.
 	if ($stdout -match '(?s)##AVD_LOCAL_DISCOVERY_ERROR##(.+)') {
-		Write-Warning "[LocalDiscovery | $vmName] LocalScript.ps1 reported an error: $($Matches[1].Trim())"
+		Write-Warning "[LocalDiscovery | $vmName] Invoke-AvdSessionHostAudit.ps1 reported an error: $($Matches[1].Trim())"
 		continue
 	}
 
@@ -4094,9 +4094,9 @@ try {
 	$endTime       = (Get-Date).ToUniversalTime().Date          # midnight UTC today
 	$startTime     = $endTime.AddDays(-$LookbackDays)
 
-	$resolvedOutputDirectory    = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path $PSScriptRoot 'avd-metrics' } else { [System.IO.Path]::GetFullPath($OutputDirectory) }
+	$resolvedOutputDirectory    = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path (Split-Path $PSScriptRoot -Parent) 'output\avd-metrics' } else { [System.IO.Path]::GetFullPath($OutputDirectory) }
 	$resolvedOutputPath         = New-ExportFilePath -Directory $resolvedOutputDirectory -CustomerCode $customerCode
-	$resolvedVmDiscoveryDirectory = Join-Path $PSScriptRoot 'vm-discovery'
+	$resolvedVmDiscoveryDirectory = Join-Path (Split-Path $PSScriptRoot -Parent) 'output\vm-discovery'
 	$gitHubRawBaseUrl             = "https://raw.githubusercontent.com/wavenetuk/avd-discovery/$GitHubBranch"
 
 	if (-not [string]::IsNullOrWhiteSpace($resolvedOutputDirectory) -and -not (Test-Path -Path $resolvedOutputDirectory)) {
@@ -4115,7 +4115,7 @@ try {
 	$_outFile = Split-Path $resolvedOutputPath -Leaf
 
 	Write-Banner @(
-		'AVD Discovery  —  Azure Management Plane',
+		'AVD Discovery  —  Metrics Collection',
 		'',
 		"Customer     :  $customerCode",
 		"Period       :  $($startTime.ToString('yyyy-MM-dd'))  →  $($endTime.ToString('yyyy-MM-dd'))  ($LookbackDays days)",
@@ -4162,7 +4162,7 @@ try {
 	# Keyed by String_Id (SKU part number) -> Product_Display_Name. Each product has
 	# multiple rows (one per service plan) so we take the first occurrence only.
 	$skuDisplayNameMap = @{}
-	$skuCsvPath = Join-Path $PSScriptRoot 'ms-service-plan-ids.csv'
+	$skuCsvPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'config\ms-service-plan-ids.csv'
 	Write-CheckStart 'Licence SKU Map'
 	if (Test-Path $skuCsvPath) {
 		foreach ($row in (Import-Csv -Path $skuCsvPath)) {

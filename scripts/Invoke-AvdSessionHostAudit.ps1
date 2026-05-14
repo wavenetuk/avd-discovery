@@ -7,7 +7,7 @@ Discovers installed Windows applications and key AVD host configuration details 
 This script inventories installed applications from the standard Windows uninstall registry locations for both machine-wide and per-user installs.
 It also inspects host-side profile-management settings that are not available from the Azure management plane, including FSLogix configuration, FSLogix profile container locations and sizes, OneDrive Known Folder Move policy indicators, and per-user folder redirection signals.
 It exports application data, customer abbreviation, collection timestamp, machine identity, and the discovered host configuration details.
-The primary-application exclusion filters are loaded from appExclusions.config.json stored alongside this script so they can be updated without editing PowerShell code.
+The primary-application exclusion filters are loaded from config/appExclusions.config.json (in the repository root) so they can be updated without editing PowerShell code.
 
 By default, the script removes hidden system components, child installer entries, and Windows update-style records that do not normally belong in a migration inventory.
 Use -PrimaryApplicationsOnly to apply a stricter filter that further suppresses common runtimes, redistributables, helper components, add-ins, and support packages so the output focuses on top-level applications.
@@ -26,16 +26,16 @@ Applies stricter filtering to keep the inventory focused on primary installed ap
 Skips the gpresult /h HTML export. Use this when running without access to Group Policy data or to reduce collection time.
 
 .EXAMPLE
-.\LocalScript.ps1
+.\Invoke-AvdSessionHostAudit.ps1
 
 .EXAMPLE
-.\LocalScript.ps1 -CustomerAbbreviation kcr
+.\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation kcr
 
 .EXAMPLE
-.\LocalScript.ps1 -CustomerAbbreviation kcr -PrimaryApplicationsOnly -OutputDirectory .\exports
+.\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation kcr -PrimaryApplicationsOnly -OutputDirectory .\exports
 
 .EXAMPLE
-.\LocalScript.ps1 -CustomerAbbreviation kcr -NoGpresult
+.\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation kcr -NoGpresult
 #>
 param(
 	[Parameter(Mandatory = $false)]
@@ -557,7 +557,7 @@ function Get-OutlookCachedModeDiscovery {
 
 	[PSCustomObject]@{
 		EffectiveState          = $effectiveState
-		Note                    = if ($script:IsSystemAccountMode) { 'Per-user Outlook cached mode registry settings skipped — script is running as a system/machine account. Run LocalScript.ps1 interactively on the host to collect user-specific data.' } else { $null }
+		Note                    = if ($script:IsSystemAccountMode) { 'Per-user Outlook cached mode registry settings skipped — script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to collect user-specific data.' } else { $null }
 		PolicyConfigured        = @($machinePolicySettings).Count -gt 0
 		PolicyEnableValue       = $policyEnableValue
 		MachinePolicySettings   = @($machinePolicySettings)
@@ -1103,7 +1103,7 @@ function Get-OneDriveAndFolderRedirectionDiscovery {
 
 	[PSCustomObject]@{
 		OneDrivePolicies              = Get-OneDrivePolicyState
-		Note                          = if ($script:IsSystemAccountMode) { 'Per-user shell folder, folder redirection, and mapped drive data skipped — script is running as a system/machine account. Run LocalScript.ps1 interactively on the host to collect user-specific data.' } else { $null }
+		Note                          = if ($script:IsSystemAccountMode) { 'Per-user shell folder, folder redirection, and mapped drive data skipped — script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to collect user-specific data.' } else { $null }
 		LoadedUserCount               = @($loadedUsers).Count
 		UsersWithKnownFolderMove      = @($userStates | Where-Object { $_.LikelyOneDriveKnownFolderMove }).Count
 		UsersWithFolderRedirection    = @($userStates | Where-Object { $_.LikelyFolderRedirection }).Count
@@ -1789,14 +1789,14 @@ function Get-GroupPolicyDiscovery {
 
 	[PSCustomObject]@{
 		Succeeded        = $succeeded
-		Note             = if ($script:IsSystemAccountMode -and $succeeded) { 'Report contains computer policy only (no user RSoP) — script is running as a system/machine account. Run LocalScript.ps1 interactively on the host to include user Group Policy.' } else { $null }
+		Note             = if ($script:IsSystemAccountMode -and $succeeded) { 'Report contains computer policy only (no user RSoP) — script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to include user Group Policy.' } else { $null }
 		HtmlReportPath   = if ($succeeded) { $OutputPath } else { $null }
 		Error            = $errorMessage
 	}
 }
 
 function Get-PrimaryApplicationConfigPath {
-	return Join-Path -Path $PSScriptRoot -ChildPath 'appExclusions.config.json'
+	return Join-Path (Split-Path $PSScriptRoot -Parent) 'config\appExclusions.config.json'
 }
 
 function Get-PrimaryApplicationConfig {
@@ -2374,7 +2374,7 @@ try {
 	$scriptStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 	Write-Banner @(
-		'AVD Discovery  —  Local Host Inventory',
+		'AVD Discovery  —  Session Host Audit',
 		'',
 		"Customer  :  $customerCode",
 		"Machine   :  $($env:COMPUTERNAME)",
@@ -2456,7 +2456,7 @@ try {
 	$adDependencyDiscovery = Get-ActiveDirectoryDependencyDiscovery
 	Write-CheckResult 'Success'
 
-	$resolvedOutputDirectory = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path $PSScriptRoot 'vm-discovery' } else { [System.IO.Path]::GetFullPath($OutputDirectory) }
+	$resolvedOutputDirectory = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { Join-Path (Split-Path $PSScriptRoot -Parent) 'output\vm-discovery' } else { [System.IO.Path]::GetFullPath($OutputDirectory) }
 	$resolvedOutputPath = New-ExportFilePath -Directory $resolvedOutputDirectory -CustomerCode $customerCode -Hostname $machineDetails.Hostname
 	$outputDirectory = Split-Path -Path $resolvedOutputPath -Parent
 
