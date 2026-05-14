@@ -260,7 +260,7 @@ This is the only write operation in the script and requires user consent each ti
 
 Every third polling cycle, the script queries the Run Command **instance view** directly and logs the current `executionState` (e.g. `Running`, `Pending`). If the state remains `Pending` with `provisioningState: Creating` for 90 or more seconds, the script concludes that the VM agent is not processing commands and aborts the attempt early — rather than waiting the full timeout.
 
-On the first stuck VM in a pool, a yellow advisory box is printed explaining likely causes (endpoint security blocking execution, the Azure wireserver being unreachable, or a stuck agent goal-state queue) and recommending that the user cancel and run `Invoke-AvdSessionHostAudit.ps1` directly on the host via RDP, Azure Bastion, an RMM tool, or LogicMonitor.
+On the first stuck VM in a pool, a yellow advisory box is printed explaining likely causes (endpoint security blocking execution, the Azure wireserver being unreachable, or a stuck agent goal-state queue) and recommending that the user cancel and run `Invoke-AvdSessionHostAudit.ps1` directly on the host. Access methods are listed one per line (RDP, Azure Bastion, RMM/LogicMonitor), and the exact command to run — including the customer abbreviation and any flags that were passed to the original invocation — is printed ready to copy.
 
 ### Timeout Diagnostics
 

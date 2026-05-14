@@ -270,14 +270,14 @@ function Get-RunAsCredential {
 	#>
 	Write-Host ''
 	Write-Host '  ╔══════════════════════════════════════════════════════════════════════╗' -ForegroundColor Yellow
-	Write-Host '  ║                      *** SECURITY WARNING ***                        ║' -ForegroundColor Yellow
+	Write-Host '  ║  Security notice — Run-As credentials                                ║' -ForegroundColor Yellow
 	Write-Host '  ║                                                                      ║' -ForegroundColor Yellow
-	Write-Host '  ║  The password is transmitted IN PLAINTEXT in the ARM API request     ║' -ForegroundColor Yellow
-	Write-Host '  ║  body and briefly stored in the runCommands resource. The password   ║' -ForegroundColor Yellow
-	Write-Host '  ║  is NOT logged by ARM; the username IS visible in activity logs.     ║' -ForegroundColor Yellow
+	Write-Host '  ║  The password travels in the ARM request body (HTTPS only) and is    ║' -ForegroundColor Yellow
+	Write-Host '  ║  held briefly in the runCommands resource until deleted. It is not   ║' -ForegroundColor Yellow
+	Write-Host '  ║  logged by ARM. The username IS visible in ARM activity logs.        ║' -ForegroundColor Yellow
 	Write-Host '  ║                                                                      ║' -ForegroundColor Yellow
-	Write-Host '  ║  Use a standard non-admin domain user account only.                  ║' -ForegroundColor Yellow
-	Write-Host '  ║  Do NOT use privileged, admin, or shared service accounts.           ║' -ForegroundColor Yellow
+	Write-Host '  ║  Use a standard non-admin domain account — not a service account,    ║' -ForegroundColor Yellow
+	Write-Host '  ║  shared account, or anything with elevated privileges.               ║' -ForegroundColor Yellow
 	Write-Host '  ╚══════════════════════════════════════════════════════════════════════╝' -ForegroundColor Yellow
 	Write-Host ''
 
@@ -377,7 +377,10 @@ function Write-PoolHeader {
 function Write-CheckStart {
 	param([string]$Name, [int]$Indent = 6)
 	$script:_checkLabel = (' ' * $Indent) + $Name + ' = '
-	Write-Host "$($script:_checkLabel)Running..." -ForegroundColor DarkCyan
+	if ($script:_progressTotal -gt 0) {
+		$_pct = [Math]::Min([int](($script:_progressStep / $script:_progressTotal) * 100), 100)
+		Write-Progress -Activity 'AVD Metrics Collection' -Status $Name -PercentComplete $_pct
+	}
 }
 
 function Write-CheckResult {
@@ -393,6 +396,9 @@ function Write-CheckResult {
 	}
 	$suffix = if ($Detail) { "  ($Detail)" } else { '' }
 	Write-Host "$($script:_checkLabel)$Status$suffix" -ForegroundColor $color
+	if ($script:_progressTotal -gt 0) {
+		$script:_progressStep++
+	}
 }
 
 # ------------------------------------------------------------------
@@ -894,7 +900,7 @@ function Get-AllHostPools {
 			})
 		}
 
-		Write-Host "      Found $(@($hostPools).Count) host pool(s)." -ForegroundColor DarkGray
+		Write-Host "      Discovered $(@($hostPools).Count) host pool(s)." -ForegroundColor DarkGray
 	}
 
 	return $allHostPools
@@ -1028,6 +1034,169 @@ function Get-ParsedRdpProperties {
 		CameraRedirection     = $cameraRedirect
 		UsbRedirection        = $usbRedirect
 		LocationRedirection   = (& $intFlag 'redirectlocation')
+	}
+}
+
+function Get-HostPoolSsoConfig {
+	<#
+	.SYNOPSIS
+	Assesses whether Entra ID SSO is configured for a host pool.
+
+	Join type detection strategy (in priority order):
+	  1. AADLoginForWindows extension present    → cloud-native Entra ID joined
+	  2. JsonADDomainExtension present + Graph confirms trustType=AzureAD or ServerAD
+	     → Hybrid Entra ID joined (Graph) or pure AD joined
+	  3. JsonADDomainExtension only + no Graph token → ActiveDirectory (cannot confirm hybrid)
+
+	Graph is queried for device objects matching the VM names in the pool. A device with
+	trustType = 'ServerAD' is Hybrid Entra joined; 'AzureAD' is cloud-native Entra joined.
+	If Graph is unavailable the function falls back to extension-only heuristics.
+
+	SSO prerequisites checked:
+	  - enablerdsaadauth:i:1 in customRdpProperty (required for all Entra SSO)
+	  - targetisaadjoined:i:1 (recommended for Entra ID joined pools)
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[PSCustomObject]$Infra,
+
+		[Parameter(Mandatory = $true)]
+		[PSCustomObject]$RdpProperties,
+
+		[Parameter(Mandatory = $false)]
+		[AllowNull()]
+		[string]$GraphToken,
+
+		[Parameter(Mandatory = $false)]
+		[AllowNull()]
+		[PSCustomObject]$CloudKerberosTrust
+	)
+
+	$allSettings = if ($null -ne $RdpProperties -and $null -ne $RdpProperties.AllSettings) { $RdpProperties.AllSettings } else { @{} }
+
+	$hasAadExt = @($Infra.VmExtensions | Where-Object {
+		$_.Type -in @('AADLoginForWindows', 'AADLoginForWindowsWithIntune')
+	}).Count -gt 0
+	$hasAdExt  = @($Infra.VmExtensions | Where-Object {
+		$_.Type -eq 'JsonADDomainExtension'
+	}).Count -gt 0
+
+	# --- Graph device lookup ---
+	# Sample up to 5 VM names to avoid excessive Graph calls on large pools.
+	# trustType values: 'AzureAD' = Entra joined, 'ServerAD' = Hybrid Entra joined,
+	# 'Workplace' = registered only (not joined).
+	$graphDevices        = @()
+	$graphQueried        = $false
+	$graphTrustTypes     = @()
+	if (-not [string]::IsNullOrEmpty($GraphToken) -and @($Infra.VmResourceIds).Count -gt 0) {
+		$graphQueried = $true
+		$sampleIds    = @($Infra.VmResourceIds | Select-Object -First 5)
+		foreach ($vmId in $sampleIds) {
+			$vmName = ($vmId -split '/')[-1]
+			$_enc   = [Uri]::EscapeDataString($vmName)
+			$_uri   = "https://graph.microsoft.com/v1.0/devices?`$filter=displayName eq '$_enc'&`$select=displayName,trustType,isCompliant,isManaged"
+			$_resp  = Invoke-GraphGet -Uri $_uri -GraphToken $GraphToken
+			if ($_resp -and $_resp.value) {
+				foreach ($dev in $_resp.value) {
+					$graphDevices    += $dev
+					if (-not [string]::IsNullOrEmpty($dev.trustType)) {
+						$graphTrustTypes += $dev.trustType
+					}
+				}
+			}
+		}
+	}
+
+	$distinctTrustTypes = @($graphTrustTypes | Select-Object -Unique)
+	$hasGraphServerAD   = 'ServerAD' -in $distinctTrustTypes   # Hybrid Entra joined
+	$hasGraphAzureAD    = 'AzureAD'  -in $distinctTrustTypes   # Cloud-native Entra joined
+
+	# Determine join type — Graph results take precedence over extension heuristics
+	$joinType = if ($hasAadExt) {
+		# AADLoginForWindows extension is only deployed on cloud-native Entra joined VMs
+		'EntraID'
+	} elseif ($graphQueried -and $hasGraphServerAD) {
+		'HybridEntraID'
+	} elseif ($graphQueried -and $hasGraphAzureAD) {
+		'EntraID'
+	} elseif ($hasAdExt -and $graphQueried -and -not $hasGraphServerAD -and -not $hasGraphAzureAD) {
+		# AD extension present, Graph returned devices but none were Entra joined
+		'ActiveDirectory'
+	} elseif ($hasAdExt -and -not $graphQueried) {
+		# AD extension only, no Graph — cannot confirm whether hybrid
+		'ActiveDirectoryUnconfirmed'
+	} else {
+		$Infra.DomainJoinType
+	}
+
+	$entraAuthEnabled = $allSettings.ContainsKey('enablerdsaadauth')  -and $allSettings['enablerdsaadauth'] -eq 1
+	$targetAadJoined  = $allSettings.ContainsKey('targetisaadjoined') -and $allSettings['targetisaadjoined'] -eq 1
+	$credSspEnabled   = if ($allSettings.ContainsKey('enablecredsspsupport')) { $allSettings['enablecredsspsupport'] -eq 1 } else { $null }
+
+	$blockers   = [System.Collections.Generic.List[string]]::new()
+	$advisories = [System.Collections.Generic.List[string]]::new()
+	$notes      = [System.Collections.Generic.List[string]]::new()
+
+	$ssoType = switch ($joinType) {
+		'EntraID' {
+			if (-not $entraAuthEnabled) {
+				$blockers.Add('enablerdsaadauth:i:1 not set in RDP properties — Entra SSO will not function') | Out-Null
+			}
+			if (-not $targetAadJoined) {
+				$advisories.Add('targetisaadjoined:i:1 not set in RDP properties — recommended for Entra ID joined hosts') | Out-Null
+			}
+			'EntraID'
+		}
+		'HybridEntraID' {
+			if (-not $entraAuthEnabled) {
+				$blockers.Add('enablerdsaadauth:i:1 not set in RDP properties — Entra SSO will not function') | Out-Null
+			}
+			# Check Cloud Kerberos Trust — required for password-less / MFA-capable Hybrid SSO
+			if ($null -eq $CloudKerberosTrust -or $CloudKerberosTrust.Status -eq 'GraphCallFailed') {
+				$advisories.Add('Cloud Kerberos Trust status could not be determined (Graph Beta call failed) — verify Set-AzureADKerberosServer has been run against the on-premises AD') | Out-Null
+			} elseif ($CloudKerberosTrust.Configured -eq $true) {
+				$notes.Add("Cloud Kerberos Trust configured$(if ($CloudKerberosTrust.ServiceAccount) { " (service account: $($CloudKerberosTrust.ServiceAccount))" })") | Out-Null
+			} else {
+				$blockers.Add('Cloud Kerberos Trust is not configured in this tenant — Hybrid Entra SSO requires Set-AzureADKerberosServer to be run against the on-premises AD, or certificate-based SSO configured as an alternative') | Out-Null
+			}
+			$notes.Add('Hybrid Entra joined (confirmed via Graph trustType=ServerAD)') | Out-Null
+			'HybridEntraID'
+		}
+		'ActiveDirectory' {
+			if ($entraAuthEnabled) {
+				$advisories.Add('enablerdsaadauth:i:1 is set but Graph confirms hosts are pure AD joined — this property has no effect') | Out-Null
+			}
+			$notes.Add('Pure Active Directory joined (confirmed via Graph) — Entra ID SSO is not available; users authenticate via Kerberos') | Out-Null
+			'LegacyKerberos'
+		}
+		'ActiveDirectoryUnconfirmed' {
+			if ($entraAuthEnabled) {
+				$notes.Add('enablerdsaadauth:i:1 is set and AD extension is present — hosts may be Hybrid Entra joined but Graph token was unavailable to confirm') | Out-Null
+			} else {
+				$notes.Add('AD extension present, no Graph token available — cannot confirm whether Hybrid Entra joined') | Out-Null
+			}
+			'ActiveDirectoryUnconfirmed'
+		}
+		default {
+			$notes.Add('VM join type could not be determined — SSO configuration could not be fully assessed') | Out-Null
+			'Unknown'
+		}
+	}
+
+	[PSCustomObject]@{
+		SsoEnabled            = ($blockers.Count -eq 0) -and ($ssoType -notin @('LegacyKerberos', 'ActiveDirectoryUnconfirmed', 'Unknown'))
+		SsoType               = $ssoType
+		DetectedJoinType      = $joinType
+		GraphQueried          = $graphQueried
+		GraphDevicesFound     = @($graphDevices).Count
+		GraphTrustTypes       = $distinctTrustTypes
+		CloudKerberosTrust    = $CloudKerberosTrust
+		EntraAuthRdpEnabled   = $entraAuthEnabled
+		TargetIsAadJoined     = $targetAadJoined
+		CredSspSupportEnabled = $credSspEnabled
+		Blockers              = @($blockers)
+		Advisories            = @($advisories)
+		Notes                 = @($notes)
 	}
 }
 
@@ -2839,6 +3008,59 @@ function Invoke-GraphGet {
 	catch { return $null }
 }
 
+function Get-CloudKerberosTrustStatus {
+	<#
+	.SYNOPSIS
+	Queries the Graph Beta endpoint for on-premises directory sync configuration and
+	returns whether Cloud Kerberos Trust (AzureADKerberos) is configured in the tenant.
+	Returns a structured object with Configured (bool|null), ServiceAccount details,
+	and a Status string. Null Configured means the call failed or was inconclusive.
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$GraphToken
+	)
+
+	$uri  = 'https://graph.microsoft.com/beta/directory/onPremisesDirectorySynchronization'
+	$resp = Invoke-GraphGet -Uri $uri -GraphToken $GraphToken
+
+	if ($null -eq $resp) {
+		return [PSCustomObject]@{
+			Configured     = $null
+			ServiceAccount = $null
+			Status         = 'GraphCallFailed'
+		}
+	}
+
+	# The kerberosSignOnSettings property is only present when AzureADKerberos
+	# has been configured via Set-AzureADKerberosServer / Set-AADKerberosServer.
+	$kerb = $null
+	try {
+		# Response may be a single object or a value array depending on tenant config
+		$target = if ($resp.PSObject.Properties['value'] -and $resp.value) { $resp.value[0] } else { $resp }
+		if ($target.PSObject.Properties['configuration'] -and
+		    $target.configuration.PSObject.Properties['kerberosSignOnSettings']) {
+			$kerb = $target.configuration.kerberosSignOnSettings
+		}
+	}
+	catch { }
+
+	if ($null -ne $kerb) {
+		return [PSCustomObject]@{
+			Configured     = $true
+			ServiceAccount = if ($kerb.PSObject.Properties['kerberosServiceAccountName']) { $kerb.kerberosServiceAccountName } else { $null }
+			Status         = 'Configured'
+		}
+	}
+
+	# Sync config was returned but no kerberos block — not configured
+	return [PSCustomObject]@{
+		Configured     = $false
+		ServiceAccount = $null
+		Status         = 'NotConfigured'
+	}
+}
+
 function Get-GroupTransitiveMemberUserIds {
 	<#
 	.SYNOPSIS
@@ -3731,9 +3953,14 @@ function Invoke-HostPoolLocalDiscovery {
 	}
 
 	# Collect all running VMs so we can fall back to the next one if a VM's agent is stuck.
+	$_ldActivity = "Local Discovery  ─  $($Pool.Name)"
+	$_ldVmTotal  = @($VmResourceIds).Count
+	$_ldVmIdx    = 0
 	$runningVmIds = @()
 	foreach ($vmId in $VmResourceIds) {
 		$candidateName = ($vmId -split '/')[-1]
+		$_ldVmIdx++
+		Write-Progress -Id 1 -ParentId 0 -Activity $_ldActivity -Status "Checking power state: $candidateName ($_ldVmIdx/$_ldVmTotal)"
 		Write-Host "    [LocalDiscovery | $($Pool.Name)] Checking power state: $candidateName"
 		$state = Get-VmPowerState -VmResourceId $vmId
 		if ($state -eq 'PowerState/running') {
@@ -3909,6 +4136,7 @@ function Invoke-HostPoolLocalDiscovery {
 	# compresses the output, and writes the base64 payload to a staging file — returning
 	# just the path and size via stdout (stdout itself is limited to the last 4,096 chars).
 	$stdout = $null
+	Write-Progress -Id 1 -ParentId 0 -Activity $_ldActivity -Status "Running discovery on $vmName  (may take 1–3 min)"
 	try {
 		$stdout = Invoke-VmRunCommand -VmResourceId $targetVmId -Script $wrapperLines -Parameters $wrapperParams -TimeoutSeconds $TimeoutSeconds -RunAsCredential $RunAsCredential
 	}
@@ -3922,11 +4150,8 @@ function Invoke-HostPoolLocalDiscovery {
 	if ($stdout -eq '##AVD_VM_STUCK##') {
 		$stuckCount++
 		if ($stuckCount -eq 1) {
-			$_w  = 73
-			$_hr = '─' * $_w
-			Write-Host ''
-			Write-Host "    ┌$_hr┐" -ForegroundColor Yellow
-			foreach ($_s in @(
+			$_cmd = ".\scripts\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation $CustomerCode$(if ($NoGpresult.IsPresent) { ' -NoGpresult' })"
+			$_lines = @(
 				'',
 				'  Run Command appears to be blocked on this host pool',
 				'',
@@ -3935,17 +4160,24 @@ function Invoke-HostPoolLocalDiscovery {
 				'    • A network policy blocking the Azure wireserver (168.63.129.16)',
 				'    • A stuck VM agent goal-state queue (restart WindowsAzureGuestAgent)',
 				'',
-				'  RECOMMENDED: Cancel (Ctrl+C) and run Invoke-AvdSessionHostAudit.ps1 directly on the',
-				'  session host. Access the VM using any of the following methods:',
+				'  RECOMMENDED: Cancel (Ctrl+C) and run Invoke-AvdSessionHostAudit.ps1 directly',
+				"  on $vmName using one of the following methods:",
 				'',
-				"    1. RDP or Azure Bastion to:         $vmName",
-				"    2. RMM tool or LogicMonitor to:     $vmName",
+				"    1. RDP to:             $vmName",
+				"    2. Azure Bastion to:   $vmName",
+				"    3. RMM / LogicMonitor: $vmName",
 				'',
-				'    Then run: .\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation <code>',
+				'  Then run:',
+				"    $_cmd",
 				'',
 				'  Continuing to try remaining hosts — press Ctrl+C to cancel.',
 				''
-			)) {
+			)
+			$_w  = [Math]::Max(($_lines | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum, 60)
+			$_hr = '─' * $_w
+			Write-Host ''
+			Write-Host "    ┌$_hr┐" -ForegroundColor Yellow
+			foreach ($_s in $_lines) {
 				Write-Host "    │$($_s.PadRight($_w))│" -ForegroundColor Yellow
 			}
 			Write-Host "    └$_hr┘" -ForegroundColor Yellow
@@ -3984,10 +4216,13 @@ function Invoke-HostPoolLocalDiscovery {
 
 	# Read the staging file back in chunks, then delete it regardless of success or failure.
 	$b64Payload = $null
+	$_chunkCount = [Math]::Ceiling($fileSize / 3900)
+	Write-Progress -Id 1 -ParentId 0 -Activity $_ldActivity -Status "Retrieving output from $vmName  ($_chunkCount chunk(s))"
 	try {
 		$b64Payload = Read-VmFileInChunks -VmResourceId $targetVmId -FilePath $stagingPath -FileLength $fileSize
 	}
 	finally {
+		Write-Progress -Id 1 -ParentId 0 -Activity $_ldActivity -Status "Cleaning up staging file on $vmName"
 		Write-Host "    [LocalDiscovery | $vmName] Deleting staging file..."
 		$cleanupLines = @("if (Test-Path '$stagingPath') { Remove-Item -Path '$stagingPath' -Force -ErrorAction SilentlyContinue }")
 		Invoke-VmRunCommand -VmResourceId $targetVmId -Script $cleanupLines -TimeoutSeconds 60 -InitialPollSeconds 3 | Out-Null
@@ -4027,6 +4262,8 @@ function Invoke-HostPoolLocalDiscovery {
 		$gpFileSize = [int]$Matches[2]
 		$gpHtmlSize = ''
 		if ($stdout -match '##HTML##(\d+)##') { $gpHtmlSize = " (HTML: $([Math]::Round([int64]$Matches[1] / 1KB, 1)) KB)" }
+		$_gpChunkCount = [Math]::Ceiling($gpFileSize / 3900)
+		Write-Progress -Id 1 -ParentId 0 -Activity $_ldActivity -Status "Retrieving Group Policy report from $vmName  ($_gpChunkCount chunk(s))"
 		Write-Host "    [LocalDiscovery | $vmName] Retrieving gpresult HTML ($gpFileSize chars)$gpHtmlSize..."
 		$gpB64 = $null
 		try {
@@ -4054,10 +4291,12 @@ function Invoke-HostPoolLocalDiscovery {
 		}
 	}
 	# Success — this VM worked, stop trying others.
+	Write-Progress -Id 1 -Completed
 	return
 	}
 
 	# All running VMs exhausted without success
+	Write-Progress -Id 1 -Completed
 	Write-Warning "[LocalDiscovery | $($Pool.Name)] All $($runningVmIds.Count) running host(s) failed or had stuck agents — local discovery could not be completed."
 }
 
@@ -4126,21 +4365,41 @@ try {
 		"Output       :  $_outFile"
 	) -Color Cyan
 
+	$script:_progressStep  = 0
+	$script:_progressTotal = 0  # Set to real value after Host Pools count is known
+
 	Write-Rule 'DISCOVERY'
 
 	Write-CheckStart 'Subscriptions'
 	$subscriptions = Get-TargetSubscriptions -SubscriptionIds $SubscriptionId
-	Write-CheckResult 'Success' "$(@($subscriptions).Count) accessible"
+	$_subResultDetail = if ($SubscriptionId -and @($SubscriptionId).Count -gt 0) {
+		$_totalSubs = @(Get-AzSubscription -WarningAction SilentlyContinue | Where-Object { $_.State -eq 'Enabled' }).Count
+		"$(@($subscriptions).Count) selected (filtered from $_totalSubs accessible)"
+	} else {
+		"$(@($subscriptions).Count) accessible"
+	}
+	Write-CheckResult 'Success' $_subResultDetail
 
 	Write-CheckStart 'Host Pools'
 	$hostPools = Get-AllHostPools -Subscriptions $subscriptions
+	$_totalDiscovered = $hostPools.Count
 	if ($HostPoolName -and @($HostPoolName).Count -gt 0) {
 		$hostPools = @($hostPools | Where-Object { $_.Name -in $HostPoolName })
 		if ($hostPools.Count -eq 0) {
 			throw "No host pools matched the specified -HostPoolName filter: $($HostPoolName -join ', ')"
 		}
 	}
-	Write-CheckResult 'Success' "$($hostPools.Count) found across $(@($subscriptions).Count) subscription(s)"
+	$_poolResultDetail = if ($hostPools.Count -lt $_totalDiscovered) {
+		"$($hostPools.Count) selected (filtered from $_totalDiscovered across $(@($subscriptions).Count) subscription(s))"
+	} else {
+		"$($hostPools.Count) found across $(@($subscriptions).Count) subscription(s)"
+	}
+	Write-CheckResult 'Success' $_poolResultDetail
+
+	# Set progress total now that pool count is known.
+	# Formula: 4 remaining pre-loop checks + 13 per-pool checks + 1 licence tail check.
+	$script:_progressStep  = 2  # Subscriptions + Host Pools already completed
+	$script:_progressTotal = 3 + (13 * $hostPools.Count) + 1
 
 	# Collect run-as credentials after host pool discovery so the prompt
 	# appears once (not per-pool) and only when there are pools to process.
@@ -4156,6 +4415,13 @@ try {
 		Write-CheckResult 'Success' 'Group expansion enabled'
 	} else {
 		Write-CheckResult 'Skipped' 'Unavailable — group membership will not be expanded'
+	}
+
+	# Tenant-level Cloud Kerberos Trust check — used by Get-HostPoolSsoConfig for HAADJ pools.
+	# Queried once here so it is not repeated per pool.
+	$cloudKerberosTrust = $null
+	if ($graphToken) {
+		$cloudKerberosTrust = Get-CloudKerberosTrustStatus -GraphToken $graphToken
 	}
 
 	# Load Microsoft licence SKU display-name map from the CSV published by Microsoft.
@@ -4230,9 +4496,25 @@ try {
 		$rdpProperties = Get-ParsedRdpProperties -CustomRdpProperty $pool.CustomRdpProperty
 		Write-CheckResult 'Success'
 
-		Write-CheckStart 'Reservation Matches'
-		$reservations = Get-ReservationMatches -VmSkus @(if ($infra.VmSkus) { $infra.VmSkus } else { @() }) -Location $pool.Location -AllReservations $allReservations
-		Write-CheckResult 'Success' "Status: $($reservations.ReservationMatchStatus)"
+		Write-CheckStart 'Entra SSO'
+		$ssoConfig = Get-HostPoolSsoConfig -Infra $infra -RdpProperties $rdpProperties -GraphToken $graphToken -CloudKerberosTrust $cloudKerberosTrust
+		$_ssoDetail = switch ($ssoConfig.SsoType) {
+			'EntraID'       { if ($ssoConfig.SsoEnabled) { "Enabled  |  Type: Entra ID" }         else { "Not configured  |  $(@($ssoConfig.Blockers).Count) blocker(s)" } }
+			'HybridEntraID' { if ($ssoConfig.SsoEnabled) { "Enabled  |  Type: Hybrid Entra ID" }   else { "Not configured  |  $(@($ssoConfig.Blockers).Count) blocker(s)" } }
+			'LegacyKerberos'{ "N/A  |  Pure AD joined (Kerberos only)" }
+			default         { "Unknown join type — could not assess" }
+		}
+		$_ssoStatus = if ($ssoConfig.SsoType -eq 'LegacyKerberos') { 'Skipped' } elseif (-not $ssoConfig.SsoEnabled) { 'Failed' } else { 'Success' }
+		Write-CheckResult $_ssoStatus $_ssoDetail
+
+		Write-CheckStart 'Authorized Users'
+		$authUsers = Get-HostPoolAuthorizedUsers -HostPool $pool -GraphToken $graphToken -AppGroupCache $appGroupCache -WorkspaceCache $workspaceCache
+		foreach ($uid in $authUsers.AuthorizedUserIds) { $allAuthorizedUserIds.Add($uid) | Out-Null }
+		Write-CheckResult 'Success' "Count: $($authUsers.AuthorizedUserCount)  |  Status: $($authUsers.AuthorizedUserStatus)"
+
+		Write-CheckStart 'Registration Token'
+		$regToken = Get-HostPoolRegistrationToken -HostPool $pool
+		Write-CheckResult 'Success' "Active: $($regToken.HasActiveToken)"
 
 		Write-CheckStart 'Backup Info'
 		$backupInfo = if ($pool.HostPoolType -eq 'Personal') {
@@ -4244,6 +4526,10 @@ try {
 			[PSCustomObject]@{ BackupInfo = $null; BackupInfoStatus = 'NotApplicable' }
 		}
 
+		Write-CheckStart 'Reservation Matches'
+		$reservations = Get-ReservationMatches -VmSkus @(if ($infra.VmSkus) { $infra.VmSkus } else { @() }) -Location $pool.Location -AllReservations $allReservations
+		Write-CheckResult 'Success' "Status: $($reservations.ReservationMatchStatus)"
+
 		Write-CheckStart 'Usage Metrics'
 		$metrics = Get-HostPoolDailyAverageUsers -HostPool $pool -StartTime $startTime -EndTime $endTime -ExcludeWeekends:$ExcludeWeekends -PeakHoursOnly:$PeakHoursOnly -UtcOffsetHours $UtcOffsetHours
 		$_usageResult = if ($metrics.MetricStatus -match 'Error') { 'Failed' } elseif ($metrics.MetricStatus -match 'NoDiagnosticSettings|NoData') { 'Skipped' } else { 'Success' }
@@ -4254,34 +4540,25 @@ try {
 		$_sessResult = if ($sessionMetrics.SessionsStatus -match 'Error') { 'Failed' } elseif ($sessionMetrics.SessionsStatus -match 'NoDiagnosticSettings|NoData') { 'Skipped' } else { 'Success' }
 		Write-CheckResult $_sessResult "Peak: $(if ($null -ne $sessionMetrics.PeakConcurrentSessions) { $sessionMetrics.PeakConcurrentSessions } else { 'N/A' })  |  Status: $($sessionMetrics.SessionsStatus)"
 
-		Write-CheckStart 'Diagnostic Insights'
-		$diagInsights = Get-HostPoolDiagnosticInsights -HostPool $pool -StartTime $startTime -EndTime $endTime
-		$_diagResult = if ($diagInsights.DiagnosticsStatus -match 'Error') { 'Failed' } elseif ($diagInsights.DiagnosticsStatus -match 'NoDiagnosticSettings') { 'Skipped' } else { 'Success' }
-		Write-CheckResult $_diagResult "Status: $($diagInsights.DiagnosticsStatus)"
+		Write-CheckStart 'Hosts On / Off'
+		$hostsOnMetrics = Get-HostPoolDailyHostsOn -VmResourceIds $infra.VmResourceIds -StartTime $startTime -EndTime $endTime -ExcludeWeekends:$ExcludeWeekends
+		$_hostsOnResult = if ($hostsOnMetrics.DailyHostsOnStatus -match 'Error') { 'Failed' } elseif ($hostsOnMetrics.DailyHostsOnStatus -match 'NoVMs|NoData') { 'Skipped' } else { 'Success' }
+		Write-CheckResult $_hostsOnResult "Avg Hosts On/Day: $(if ($null -ne $hostsOnMetrics.AverageHostsOnPerDay) { [Math]::Round($hostsOnMetrics.AverageHostsOnPerDay, 1) } else { 'N/A' })"
 
 		Write-CheckStart 'CPU Metrics'
 		$cpuMetrics = Get-HostPoolVmCpuMetrics -VmResourceIds $infra.VmResourceIds -StartTime $startTime -EndTime $endTime -ExcludeWeekends:$ExcludeWeekends -PeakHoursOnly:$PeakHoursOnly -UtcOffsetHours $UtcOffsetHours
 		$_cpuResult = if ($cpuMetrics.CpuStatus -match 'Error') { 'Failed' } elseif ($cpuMetrics.CpuStatus -match 'NoVMs|NoData') { 'Skipped' } else { 'Success' }
 		Write-CheckResult $_cpuResult "Avg: $(if ($null -ne $cpuMetrics.AvgCpuPercent) { "$($cpuMetrics.AvgCpuPercent)%" } else { 'N/A' })  |  P95: $(if ($null -ne $cpuMetrics.P95CpuPercent) { "$($cpuMetrics.P95CpuPercent)%" } else { 'N/A' })"
 
-		Write-CheckStart 'Hosts On / Off'
-		$hostsOnMetrics = Get-HostPoolDailyHostsOn -VmResourceIds $infra.VmResourceIds -StartTime $startTime -EndTime $endTime -ExcludeWeekends:$ExcludeWeekends
-		$_hostsOnResult = if ($hostsOnMetrics.DailyHostsOnStatus -match 'Error') { 'Failed' } elseif ($hostsOnMetrics.DailyHostsOnStatus -match 'NoVMs|NoData') { 'Skipped' } else { 'Success' }
-		Write-CheckResult $_hostsOnResult "Avg Hosts On/Day: $(if ($null -ne $hostsOnMetrics.AverageHostsOnPerDay) { [Math]::Round($hostsOnMetrics.AverageHostsOnPerDay, 1) } else { 'N/A' })"
-
 		Write-CheckStart 'Memory Metrics'
 		$memMetrics = Get-HostPoolVmMemoryMetrics -VmResourceIds $infra.VmResourceIds -VmSizeMap $infra.VmSizeMap -VmSizeMemoryGbMap $vmSizeMemGbMap -StartTime $startTime -EndTime $endTime -ExcludeWeekends:$ExcludeWeekends -PeakHoursOnly:$PeakHoursOnly -UtcOffsetHours $UtcOffsetHours
 		$_memResult = if ($memMetrics.MemoryStatus -match 'Error') { 'Failed' } elseif ($memMetrics.MemoryStatus -match 'NoVMs|NoData|NoSkuData') { 'Skipped' } else { 'Success' }
 		Write-CheckResult $_memResult "Avg: $(if ($null -ne $memMetrics.AvgMemUsedPercent) { "$($memMetrics.AvgMemUsedPercent)%" } else { 'N/A' })  |  P95: $(if ($null -ne $memMetrics.P95MemUsedPercent) { "$($memMetrics.P95MemUsedPercent)%" } else { 'N/A' })"
 
-		Write-CheckStart 'Authorized Users'
-		$authUsers = Get-HostPoolAuthorizedUsers -HostPool $pool -GraphToken $graphToken -AppGroupCache $appGroupCache -WorkspaceCache $workspaceCache
-		foreach ($uid in $authUsers.AuthorizedUserIds) { $allAuthorizedUserIds.Add($uid) | Out-Null }
-		Write-CheckResult 'Success' "Count: $($authUsers.AuthorizedUserCount)  |  Status: $($authUsers.AuthorizedUserStatus)"
-
-		Write-CheckStart 'Registration Token'
-		$regToken = Get-HostPoolRegistrationToken -HostPool $pool
-		Write-CheckResult 'Success' "Active: $($regToken.HasActiveToken)"
+		Write-CheckStart 'Diagnostic Insights'
+		$diagInsights = Get-HostPoolDiagnosticInsights -HostPool $pool -StartTime $startTime -EndTime $endTime
+		$_diagResult = if ($diagInsights.DiagnosticsStatus -match 'Error') { 'Failed' } elseif ($diagInsights.DiagnosticsStatus -match 'NoDiagnosticSettings') { 'Skipped' } else { 'Success' }
+		Write-CheckResult $_diagResult "Status: $($diagInsights.DiagnosticsStatus)"
 
 		if ($RunLocalDiscovery.IsPresent -and @($infra.VmResourceIds).Count -gt 0) {
 			Write-Rule 'Local Discovery' -TitleColor DarkCyan
@@ -4353,6 +4630,7 @@ try {
 			BackupInfo             = $backupInfo.BackupInfo
 			ScalingPlan          = $infra.ScalingPlan
 			RdpProperties        = $rdpProperties
+			SsoConfig            = $ssoConfig
 			RegistrationToken    = $regToken
 			WorkspaceNames       = $authUsers.WorkspaceNames
 			AppGroupNames        = $authUsers.AppGroupNames
@@ -4433,6 +4711,8 @@ try {
 			Write-CheckResult 'Skipped' "Status: $($licSummary.LicenseSummaryStatus)"
 		}
 	}
+
+	Write-Progress -Activity 'AVD Metrics Collection' -Completed
 
 	# ── Storage Account FSLogix scan ─────────────────────────────────────────
 	$storageResults = @()
