@@ -2593,17 +2593,1320 @@ function New-ExportFilePath {
 	return Join-Path -Path $Directory -ChildPath $fileName
 }
 
+function Write-AvdHtmlReport {
+	param(
+		[Parameter(Mandatory = $true)]
+		$Data,
+
+		[Parameter(Mandatory = $true)]
+		[string]$OutputPath,
+
+		[Parameter(Mandatory = $true)]
+		[string]$Title,
+
+		[Parameter(Mandatory = $false)]
+		[string]$SourceJsonFileName
+	)
+
+	$resolvedTitle = $Title
+	$looksLikeCommand = -not [string]::IsNullOrWhiteSpace($resolvedTitle) -and (
+		($resolvedTitle.Length -gt 120 -and (
+			$resolvedTitle -match '(?i)(Get-Location|ParseFile|Write-AvdHtmlReport|ConvertFrom-Json|Join-Path)' -or
+			($resolvedTitle -match '\$[A-Za-z_][A-Za-z0-9_]*' -and $resolvedTitle -match ';')
+		)) -or
+		$resolvedTitle -match '(?i)(^|\s)(?:\.\\|[A-Za-z]:\\)[^\r\n]+\.ps1\b.*\s-[A-Za-z][A-Za-z0-9]*'
+	)
+	if ([string]::IsNullOrWhiteSpace($resolvedTitle) -or $looksLikeCommand) {
+		if ($Data.PSObject.Properties['HostPools']) {
+			$resolvedTitle = if ([string]::IsNullOrWhiteSpace($Data.CustomerAbbreviation)) { 'AVD Metrics Report' } else { "AVD Metrics Report - $($Data.CustomerAbbreviation)" }
+		}
+		elseif ($Data.PSObject.Properties['Machine']) {
+			$resolvedTitle = if ($Data.Machine -and -not [string]::IsNullOrWhiteSpace($Data.Machine.Hostname)) { "AVD Host Audit Report - $($Data.Machine.Hostname)" } else { 'AVD Host Audit Report' }
+		}
+		else {
+			$resolvedTitle = 'AVD Discovery Report'
+		}
+	}
+
+	$jsonPayload = $Data | ConvertTo-Json -Depth 12 -Compress
+	$payloadB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($jsonPayload))
+	$titleJson = $resolvedTitle | ConvertTo-Json -Compress
+	$titleHtml = [System.Net.WebUtility]::HtmlEncode($resolvedTitle)
+	$sourceJson = $SourceJsonFileName | ConvertTo-Json -Compress
+	$generatedAtJson = (Get-Date).ToString('s') | ConvertTo-Json -Compress
+
+	$htmlTemplate = @'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>__REPORT_TITLE_HTML__</title>
+	<style>
+		:root {
+			--bg: #eef1f4;
+			--bg-2: #ffffff;
+			--panel: rgba(255, 255, 255, 0.78);
+			--panel-2: rgba(247, 249, 251, 0.84);
+			--panel-soft: rgba(0, 109, 203, 0.08);
+			--text: #1d252c;
+			--muted: #66727d;
+			--accent: #006dcb;
+			--accent-2: #0058a8;
+			--accent-3: #7fb9ea;
+			--line: rgba(29, 37, 44, 0.12);
+			--shadow: 0 18px 42px rgba(29, 37, 44, 0.08);
+			--block-inner-shadow: inset 0 0 26px rgba(29, 37, 44, 0.035), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+			--radius: 20px;
+		}
+		* { box-sizing: border-box; }
+		body {
+			margin: 0;
+			font-family: "Segoe UI", "Aptos", system-ui, sans-serif;
+			color: var(--text);
+			background:
+				radial-gradient(circle at top left, rgba(0, 109, 203, 0.08), transparent 22%),
+				radial-gradient(circle at top right, rgba(0, 109, 203, 0.06), transparent 28%),
+				radial-gradient(circle at 50% 120%, rgba(29, 37, 44, 0.05), transparent 34%),
+				linear-gradient(180deg, var(--bg-2) 0%, var(--bg) 100%);
+			background-attachment: fixed;
+			position: relative;
+			overflow-x: hidden;
+		}
+		body::before,
+		body::after {
+			content: "";
+			position: fixed;
+			inset: auto;
+			pointer-events: none;
+			filter: blur(52px);
+			opacity: 0.22;
+			z-index: 0;
+		}
+		body::before {
+			top: 72px;
+			left: -120px;
+			width: 320px;
+			height: 320px;
+			background: radial-gradient(circle, rgba(0, 109, 203, 0.08), transparent 68%);
+		}
+		body::after {
+			right: -100px;
+			bottom: 48px;
+			width: 280px;
+			height: 280px;
+			background: radial-gradient(circle, rgba(29, 37, 44, 0.06), transparent 68%);
+		}
+		.page {
+			width: min(1500px, calc(100vw - 32px));
+			margin: 24px auto 40px;
+			position: relative;
+			z-index: 1;
+		}
+		.hero {
+			padding: 28px;
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			border-radius: 28px;
+			background:
+				linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(248, 249, 251, 0.98) 44%, rgba(240, 246, 252, 0.98)),
+				radial-gradient(circle at top right, rgba(0, 109, 203, 0.08), transparent 32%);
+			color: var(--text);
+			box-shadow: 0 18px 42px rgba(29, 37, 44, 0.08), var(--block-inner-shadow);
+			backdrop-filter: blur(18px) saturate(114%);
+			-webkit-backdrop-filter: blur(18px) saturate(114%);
+			position: relative;
+			overflow: hidden;
+		}
+		.hero::after {
+			content: "";
+			position: absolute;
+			inset: auto -70px -90px auto;
+			width: 240px;
+			height: 240px;
+			border-radius: 50%;
+			background: radial-gradient(circle, rgba(0, 109, 203, 0.06), transparent 66%);
+			pointer-events: none;
+		}
+		.hero::before {
+			content: "";
+			position: absolute;
+			inset: 0;
+			background: linear-gradient(135deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.08) 24%, transparent 48%);
+			pointer-events: none;
+		}
+		.hero h1 {
+			margin: 0 0 10px;
+			font-size: clamp(28px, 4vw, 42px);
+			line-height: 1.05;
+			letter-spacing: -0.03em;
+			color: #000000;
+		}
+		.hero p {
+			margin: 0;
+			max-width: 80ch;
+			color: rgba(102, 114, 125, 0.95);
+			line-height: 1.5;
+			overflow-wrap: anywhere;
+		}
+		.hero-meta, .kpi-grid {
+			display: grid;
+			gap: 12px;
+		}
+		.hero-meta {
+			margin-top: 18px;
+			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		}
+		.chip {
+			display: inline-flex;
+			align-items: center;
+			flex-wrap: wrap;
+			gap: 6px;
+			padding: 10px 16px;
+			border-radius: 999px;
+			background: rgba(255, 255, 255, 0.82);
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			box-shadow: 0 10px 22px rgba(29, 37, 44, 0.05), inset 0 0 18px rgba(29, 37, 44, 0.03), inset 0 1px 0 rgba(255, 255, 255, 0.66);
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+			font-size: 13px;
+			letter-spacing: 0.02em;
+			min-width: 0;
+			overflow-wrap: anywhere;
+		}
+		.chip strong,
+		.chip span {
+			min-width: 0;
+			overflow-wrap: anywhere;
+		}
+		.toolbar {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 12px;
+			align-items: center;
+			justify-content: space-between;
+			margin: 18px 0 14px;
+		}
+		.toolbar-left {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px;
+			align-items: center;
+			min-width: 0;
+		}
+		.toolbar input {
+			width: min(420px, 100%);
+			padding: 13px 16px;
+			border: 1px solid rgba(29, 37, 44, 0.12);
+			border-radius: 14px;
+			background: rgba(255, 255, 255, 0.88);
+			color: var(--text);
+			outline: none;
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66);
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+		}
+		.toolbar input::placeholder {
+			color: rgba(102, 114, 125, 0.72);
+		}
+		.toolbar .note {
+			color: var(--muted);
+			font-size: 14px;
+			overflow-wrap: anywhere;
+		}
+		.kpi-grid {
+			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+			margin-bottom: 18px;
+		}
+		.card, .section, .data-card {
+			background: var(--panel);
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			border-radius: var(--radius);
+			box-shadow: 0 14px 30px rgba(29, 37, 44, 0.07), inset 0 0 24px rgba(29, 37, 44, 0.03), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+		}
+		.card {
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(244, 248, 252, 0.88));
+			border: 1px solid rgba(255, 255, 255, 0.68);
+			box-shadow: 0 0 22px rgba(29, 37, 44, 0.10), 0 0 40px rgba(29, 37, 44, 0.07), inset 0 0 30px rgba(29, 37, 44, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.88), inset 0 -18px 32px rgba(255, 255, 255, 0.18);
+			backdrop-filter: blur(16px) saturate(128%);
+			-webkit-backdrop-filter: blur(16px) saturate(128%);
+			display: flex;
+			flex-direction: column;
+			justify-content: space-between;
+			gap: 6px;
+			padding: 18px 18px 16px 22px;
+			min-height: 118px;
+			position: relative;
+			overflow: hidden;
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(247, 250, 253, 0.97) 58%, rgba(241, 247, 252, 0.92));
+		}
+		.card::before {
+			content: "";
+			position: absolute;
+			inset: 0 auto 0 0;
+			width: 4px;
+			background: linear-gradient(180deg, var(--accent-3), var(--accent));
+		}
+		.card::after {
+			content: "";
+			position: absolute;
+			inset: 0;
+			background:
+				linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.08) 34%, transparent 72%),
+				linear-gradient(180deg, rgba(0, 109, 203, 0.045), transparent 38%),
+				radial-gradient(circle at top left, rgba(255, 255, 255, 0.28), transparent 34%),
+				radial-gradient(circle at top right, rgba(0, 109, 203, 0.05), transparent 28%);
+			pointer-events: none;
+		}
+		.card > * {
+			position: relative;
+			z-index: 1;
+		}
+		.section::after,
+		.data-card::after {
+			content: "";
+			position: absolute;
+			inset: 0;
+			background:
+				linear-gradient(180deg, rgba(0, 109, 203, 0.025), transparent 36%),
+				radial-gradient(circle at top left, rgba(0, 109, 203, 0.025), transparent 32%);
+			pointer-events: none;
+		}
+		.eyebrow {
+			margin: 0;
+			color: #101828;
+			font-size: 12px;
+			font-weight: 700;
+			letter-spacing: 0.10em;
+			text-transform: uppercase;
+			line-height: 1.35;
+		}
+		.metric {
+			margin: 0;
+			font-size: clamp(28px, 3vw, 36px);
+			line-height: 1;
+			letter-spacing: -0.04em;
+			white-space: normal;
+			overflow-wrap: break-word;
+			word-break: normal;
+		}
+		.card.join-type .metric {
+			font-size: clamp(24px, 2.5vw, 32px);
+			white-space: normal;
+			overflow-wrap: break-word;
+			word-break: normal;
+		}
+		.subtle {
+			margin: 0;
+			color: var(--muted);
+			font-size: 13px;
+			line-height: 1.35;
+			overflow-wrap: anywhere;
+		}
+		.section {
+			padding: 20px;
+			margin-top: 16px;
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 248, 250, 0.96));
+			position: relative;
+			overflow: hidden;
+		}
+		.section::before,
+		.data-card::before {
+			content: "";
+			position: absolute;
+			inset: 0 0 auto 0;
+			height: 1px;
+			background: linear-gradient(90deg, rgba(0, 109, 203, 0.18), rgba(0, 109, 203, 0.02));
+			pointer-events: none;
+		}
+		.section h2 {
+			margin: 0 0 8px;
+			font-size: 22px;
+			letter-spacing: -0.02em;
+			color: #000000;
+		}
+		.section > p {
+			margin: 0 0 14px;
+			color: var(--muted);
+			line-height: 1.45;
+			overflow-wrap: anywhere;
+		}
+		.stat-list {
+			display: grid;
+			gap: 8px;
+		}
+		.stat-row {
+			display: flex;
+			justify-content: space-between;
+			align-items: flex-start;
+			flex-wrap: wrap;
+			gap: 18px;
+			padding-bottom: 8px;
+			border-bottom: 1px solid var(--line);
+			font-size: 14px;
+		}
+		.stat-row:last-child { border-bottom: 0; padding-bottom: 0; }
+		.muted { color: var(--muted); }
+		.bar-list {
+			display: grid;
+			gap: 10px;
+		}
+		.bar-item {
+			display: grid;
+			gap: 6px;
+		}
+		.bar-label {
+			display: flex;
+			justify-content: space-between;
+			align-items: flex-start;
+			flex-wrap: wrap;
+			gap: 16px;
+			font-size: 13px;
+			color: var(--muted);
+			min-width: 0;
+		}
+		.bar-track {
+			height: 12px;
+			border-radius: 999px;
+			background: rgba(0, 109, 203, 0.10);
+			overflow: hidden;
+		}
+		.bar-fill {
+			height: 100%;
+			border-radius: inherit;
+			background: linear-gradient(90deg, var(--accent-3), var(--accent), var(--accent-2));
+		}
+		table {
+			width: 100%;
+			border-collapse: collapse;
+			font-size: 14px;
+			min-width: 760px;
+		}
+		th, td {
+			padding: 12px 10px;
+			text-align: left;
+			vertical-align: top;
+			border-bottom: 1px solid var(--line);
+			white-space: nowrap;
+			overflow-wrap: normal;
+			word-break: normal;
+		}
+		th {
+			font-size: 12px;
+			text-transform: uppercase;
+			letter-spacing: 0.08em;
+			color: var(--muted);
+		}
+		tbody tr:hover {
+			background: rgba(0, 109, 203, 0.06);
+		}
+		.table-wrap {
+			overflow-x: auto;
+			overflow-y: hidden;
+			width: 100%;
+			max-width: 100%;
+			border-radius: 14px;
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			background: rgba(250, 251, 252, 0.76);
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+		}
+		.badge {
+			display: inline-flex;
+			align-items: center;
+			padding: 4px 9px;
+			border-radius: 999px;
+			background: rgba(0, 109, 203, 0.12);
+			color: #0058a8;
+			font-size: 12px;
+			font-weight: 700;
+			letter-spacing: 0.03em;
+			max-width: 100%;
+			overflow-wrap: anywhere;
+		}
+		.badge.neutral {
+			background: rgba(29, 37, 44, 0.08);
+			color: #52606c;
+		}
+		details {
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			border-radius: 14px;
+			background: rgba(248, 249, 251, 0.80);
+			padding: 10px 12px;
+			overflow: hidden;
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+		}
+		details + details { margin-top: 10px; }
+		summary {
+			cursor: pointer;
+			font-weight: 700;
+			color: var(--text);
+			overflow-wrap: anywhere;
+		}
+		.section-grid {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 14px;
+		}
+		.data-card {
+			padding: 0;
+			overflow: hidden;
+			background: linear-gradient(180deg, rgba(255, 255, 255, 1), rgba(246, 248, 250, 1));
+			position: relative;
+		}
+		.data-card.wide {
+			grid-column: 1 / -1;
+		}
+		.data-card.compact .data-card-body {
+			padding-top: 12px;
+		}
+		.data-card.compact .key-value {
+			gap: 6px;
+		}
+		.data-card-head {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 12px;
+			padding: 14px 18px;
+			border-bottom: 1px solid rgba(29, 37, 44, 0.08);
+			background: linear-gradient(90deg, rgba(0, 109, 203, 0.08), rgba(0, 109, 203, 0.015));
+		}
+		.data-card-head h3 {
+			margin: 0;
+			font-size: 17px;
+			letter-spacing: -0.02em;
+			overflow-wrap: anywhere;
+			flex: 1 1 auto;
+			color: #000000;
+		}
+		.section-actions {
+			display: flex;
+			gap: 8px;
+			flex: 0 0 auto;
+		}
+		.section-button {
+			appearance: none;
+			border: 1px solid rgba(29, 37, 44, 0.12);
+			background: #ffffff;
+			color: var(--text);
+			border-radius: 999px;
+			padding: 7px 12px;
+			font: inherit;
+			font-size: 12px;
+			font-weight: 700;
+			letter-spacing: 0.03em;
+			cursor: pointer;
+		}
+		.section-button:hover {
+			background: rgba(0, 109, 203, 0.04);
+		}
+		.data-card-body {
+			padding: 14px 18px 16px;
+		}
+		.key-value {
+			display: grid;
+			gap: 6px;
+		}
+		.kv-row {
+			display: grid;
+			grid-template-columns: minmax(120px, 180px) 1fr;
+			gap: 12px;
+			padding-bottom: 6px;
+			border-bottom: 1px solid var(--line);
+			font-size: 14px;
+		}
+		.kv-row:last-child { border-bottom: 0; padding-bottom: 0; }
+		.kv-row dt {
+			color: var(--muted);
+			font-weight: 600;
+			overflow-wrap: anywhere;
+		}
+		.kv-row dd {
+			margin: 0;
+			min-width: 0;
+			overflow-wrap: anywhere;
+			word-break: break-word;
+		}
+		.chips {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px;
+		}
+		pre {
+			margin: 0;
+			padding: 18px;
+			overflow: auto;
+			border-radius: 14px;
+			background: rgba(243, 246, 249, 0.98);
+			color: #33414d;
+			font-size: 12px;
+			line-height: 1.5;
+			max-height: 560px;
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+		}
+		.hidden { display: none !important; }
+		@media (max-width: 720px) {
+			.page { width: min(100vw - 18px, 1500px); margin-top: 10px; }
+			.hero, .section, .card { padding: 16px; }
+			.kv-row { grid-template-columns: 1fr; gap: 4px; }
+			.toolbar { align-items: stretch; }
+			.toolbar input { width: 100%; }
+			.section-grid { grid-template-columns: 1fr; }
+			table { min-width: 640px; }
+			th, td { white-space: normal; overflow-wrap: break-word; }
+		}
+	</style>
+</head>
+<body>
+	<div class="page">
+		<section class="hero">
+			<h1 id="report-title"></h1>
+			<div class="hero-meta" id="hero-meta"></div>
+		</section>
+		<div class="toolbar">
+			<div class="toolbar-left">
+				<span class="chip"><strong>Offline</strong> self-contained HTML report</span>
+			</div>
+			<div class="note" id="source-note"></div>
+		</div>
+		<section class="kpi-grid" id="kpi-grid"></section>
+		<section class="section hidden" id="primary-table-section">
+			<h2 id="primary-table-title"></h2>
+			<p id="primary-table-copy"></p>
+			<div class="table-wrap" id="primary-table-wrap"></div>
+		</section>
+		<section class="section hidden" id="secondary-table-section">
+			<h2 id="secondary-table-title"></h2>
+			<p id="secondary-table-copy"></p>
+			<div class="table-wrap" id="secondary-table-wrap"></div>
+		</section>
+		<section class="section" id="data-sections">
+			<h2>Structured Data</h2>
+			<div class="section-grid" id="data-grid"></div>
+		</section>
+		<section class="section">
+			<h2>Raw JSON</h2>
+			<p>Full source payload for copy/paste, ad-hoc browser search, or diffing.</p>
+			<pre id="raw-json"></pre>
+		</section>
+	</div>
+	<script>
+		const REPORT_TITLE = __REPORT_TITLE__;
+		const SOURCE_JSON = __SOURCE_JSON__;
+		const GENERATED_AT = __GENERATED_AT__;
+		const PAYLOAD_B64 = __REPORT_PAYLOAD__;
+
+		function decodeUtf8Base64(input) {
+			const binary = atob(input);
+			const bytes = new Uint8Array(binary.length);
+			for (let i = 0; i < binary.length; i += 1) {
+				bytes[i] = binary.charCodeAt(i);
+			}
+			return new TextDecoder().decode(bytes);
+		}
+
+		const data = JSON.parse(decodeUtf8Base64(PAYLOAD_B64));
+
+		function isPlainObject(value) {
+			return value !== null && typeof value === 'object' && !Array.isArray(value);
+		}
+
+		function normalizeCollection(value) {
+			if (Array.isArray(value)) { return value; }
+			if (isPlainObject(value)) {
+				const values = Object.values(value);
+				if (!values.length) { return []; }
+				if (values.every((item) => isPlainObject(item))) { return values; }
+				return [value];
+			}
+			return [];
+		}
+
+		function toNumber(value) {
+			return typeof value === 'number' && Number.isFinite(value) ? value : null;
+		}
+
+		function average(values) {
+			const clean = values.filter((value) => typeof value === 'number' && Number.isFinite(value));
+			if (!clean.length) { return null; }
+			return clean.reduce((sum, value) => sum + value, 0) / clean.length;
+		}
+
+		function formatDisplayText(value) {
+			const source = String(value);
+			const compact = source.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+			const directOverrides = {
+				azureadjoined: 'Entra ID Joined',
+				hybridazureadjoined: 'Hybrid Entra ID Joined',
+				activedirectoryjoined: 'Active Directory Joined',
+				workplacejoined: 'Workplace Joined'
+			};
+			return directOverrides[compact] || source;
+		}
+
+		function formatValue(value) {
+			if (value === null || value === undefined || value === '') { return 'None'; }
+			if (typeof value === 'boolean') { return value ? 'Yes' : 'No'; }
+			if (typeof value === 'number') {
+				if (Math.abs(value) >= 1000) { return value.toLocaleString(); }
+				return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.00$/, '');
+			}
+			if (Array.isArray(value)) { return value.length ? value.map((item) => formatDisplayText(item)).join(', ') : 'None'; }
+			if (isPlainObject(value)) { return Object.keys(value).length + ' field(s)'; }
+			return formatDisplayText(value);
+		}
+
+		function formatLabel(value) {
+			if (value === null || value === undefined || value === '') { return 'Unnamed'; }
+			const source = String(value);
+			const compact = source.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+			const directOverrides = {
+				fslogix: 'FSLogix',
+				entrasso: 'Entra SSO',
+				onedrive: 'OneDrive',
+				ad: 'AD',
+				avd: 'AVD',
+				vnet: 'VNET',
+				vnetname: 'VNET Name',
+				vnetresourcegroup: 'VNET Resource Group',
+				vnetaddressprefixes: 'VNET Address Prefixes',
+				vnetcustomdnsservers: 'VNET Custom DNS Servers',
+				laps: 'LAPS',
+				teamsmediaoptimization: 'Teams Media Optimisations',
+				teamsmediaoptimisation: 'Teams Media Optimisations',
+				activedirectorydependencies: 'Active Directory Dependencies',
+				avdconnectivity: 'AVD Connectivity',
+				rdpshortpath: 'RDP Shortpath',
+				rdpredirection: 'RDP Redirection',
+				usershellfoldersavailable: 'User Shell Folders Available'
+			};
+			if (directOverrides[compact]) { return directOverrides[compact]; }
+			const wordOverrides = {
+				ad: 'AD',
+				api: 'API',
+				app: 'App',
+				apps: 'Apps',
+				arm: 'ARM',
+				avd: 'AVD',
+				cpu: 'CPU',
+				fs: 'FS',
+				gp: 'GP',
+				html: 'HTML',
+				id: 'ID',
+				intune: 'Intune',
+				json: 'JSON',
+				kfm: 'KFM',
+				laps: 'LAPS',
+				rdp: 'RDP',
+				sku: 'SKU',
+				sso: 'SSO',
+				upn: 'UPN',
+				url: 'URL',
+				vm: 'VM'
+			};
+			const formatted = source
+				.replace(/[_-]+/g, ' ')
+				.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+				.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+				.split(/\s+/)
+				.filter(Boolean)
+				.map((part) => {
+					const lower = part.toLowerCase();
+					if (wordOverrides[lower]) { return wordOverrides[lower]; }
+					return /^[A-Z0-9]{2,}$/.test(part) ? part : part.charAt(0).toUpperCase() + part.slice(1);
+				})
+				.join(' ');
+			return formatted.replace(/\bOne Drive\b/g, 'OneDrive').replace(/\bV Net\b/g, 'VNET');
+		}
+
+		function summarizeItemLabel(item, index) {
+			if (isPlainObject(item)) {
+				const preferredKeys = ['DisplayName', 'Name', 'Hostname', 'UPN', 'UserPrincipalName', 'Path', 'ComponentName', 'TransportType', 'SkuName'];
+				for (const key of preferredKeys) {
+					if (item[key]) { return String(item[key]); }
+				}
+			}
+			return 'Item ' + (index + 1);
+		}
+
+		function isWideSection(key, value, kind) {
+			if (kind === 'host') {
+				if (new Set(['Machine', 'ActiveDirectoryDependencies', 'AvdConnectivity', 'GroupPolicy', 'UserProfileExperience']).has(key)) { return true; }
+				if (new Set(['JoinState', 'EntraSso', 'FSLogix', 'RdpShortpath', 'RdpRedirection', 'Antivirus', 'IntuneEnrollment', 'Laps', 'TeamsMediaOptimization', 'UniversalPrint', 'TimeSource', 'Printers']).has(key)) { return false; }
+			}
+			if (kind === 'metrics' && new Set(['CommandOptions', 'ArmCallStats', 'LicenseSummary', 'UnlicensedUsers']).has(key)) { return true; }
+			if (Array.isArray(value)) { return true; }
+			if (!isPlainObject(value)) { return false; }
+			const keys = Object.keys(value);
+			if (keys.length > (kind === 'host' ? 7 : 5)) { return true; }
+			return keys.some((childKey) => {
+				const child = value[childKey];
+				return Array.isArray(child) || isPlainObject(child);
+			});
+		}
+
+		function setDetailsState(root, open) {
+			root.querySelectorAll('details').forEach((node) => {
+				node.open = open;
+			});
+		}
+
+		function createSectionActions(body) {
+			const detailNodes = Array.from(body.querySelectorAll('details'));
+			if (!detailNodes.length) { return null; }
+			const actions = document.createElement('div');
+			actions.className = 'section-actions';
+			const button = document.createElement('button');
+			button.type = 'button';
+			button.className = 'section-button';
+			const syncLabel = () => {
+				button.textContent = detailNodes.every((node) => node.open) ? 'Collapse All' : 'Expand All';
+			};
+			button.addEventListener('click', () => {
+				const shouldOpen = !detailNodes.every((node) => node.open);
+				setDetailsState(body, shouldOpen);
+				syncLabel();
+			});
+			detailNodes.forEach((node) => node.addEventListener('toggle', syncLabel));
+			syncLabel();
+			actions.appendChild(button);
+			return actions;
+		}
+
+		function orderedSectionEntries(kind, source) {
+			const order = kind === 'metrics'
+				? ['CustomerAbbreviation', 'CollectedAt', 'MetricPeriodStart', 'MetricPeriodEnd', 'HostPools', 'CommandOptions', 'LicenseSummaryStatus', 'LicenseSummary', 'UnlicensedUsers', 'ArmCallStats']
+				: ['__ExecutionContext', 'Machine', 'JoinState', 'EntraSso', 'FSLogix', 'UserProfileExperience', 'RdpShortpath', 'RdpRedirection', 'ActiveDirectoryDependencies', 'AvdConnectivity', 'GroupPolicy', 'Antivirus', 'IntuneEnrollment', 'Laps', 'TeamsMediaOptimization', 'UniversalPrint', 'TimeSource', 'Printers'];
+			const rank = new Map(order.map((key, index) => [key, index]));
+			const entries = Object.entries(source);
+			if (kind === 'host') {
+				entries.push(['__ExecutionContext', {
+					CustomerAbbreviation: data.CustomerAbbreviation,
+					CollectedAt: data.CollectedAt,
+					CollectionMode: data.CollectionMode,
+					RunningAsAccount: data.RunningAsAccount,
+					DiscoveryType: data.DiscoveryType,
+					GeneratedBy: data.GeneratedBy,
+					ProjectCode: data.ProjectCode,
+					PrimaryApplicationsOnly: data.PrimaryApplicationsOnly
+				}]);
+			}
+			return entries.sort(([leftKey], [rightKey]) => {
+				const leftRank = rank.has(leftKey) ? rank.get(leftKey) : 999;
+				const rightRank = rank.has(rightKey) ? rank.get(rightKey) : 999;
+				if (leftRank !== rightRank) { return leftRank - rightRank; }
+				return leftKey.localeCompare(rightKey);
+			});
+		}
+
+		function createBadge(text, variant) {
+			const badge = document.createElement('span');
+			badge.className = 'badge' + (variant ? ' ' + variant : '');
+			badge.textContent = text;
+			return badge;
+		}
+
+		function createCard(label, value, detail) {
+			const article = document.createElement('article');
+			article.className = 'card';
+			article.dataset.card = String(label || '').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+			const eyebrow = document.createElement('p');
+			eyebrow.className = 'eyebrow';
+			eyebrow.textContent = label;
+			const metric = document.createElement('p');
+			metric.className = 'metric';
+			metric.textContent = formatValue(value);
+			const subtle = document.createElement('p');
+			subtle.className = 'subtle';
+			subtle.textContent = detail || '';
+			article.append(eyebrow, metric, subtle);
+			return article;
+		}
+
+		function createSummaryCard(label, value, detail, variant) {
+			const card = createCard(label, value, detail);
+			if (variant) { card.classList.add(variant); }
+			return card;
+		}
+
+		function createStatList(items) {
+			const wrapper = document.createElement('div');
+			wrapper.className = 'stat-list';
+			items.forEach((item) => {
+				const row = document.createElement('div');
+				row.className = 'stat-row';
+				const label = document.createElement('span');
+				label.className = 'muted';
+				label.textContent = item.label;
+				const value = document.createElement('strong');
+				value.textContent = formatValue(item.value);
+				row.append(label, value);
+				wrapper.appendChild(row);
+			});
+			return wrapper;
+		}
+
+		function createBarList(items) {
+			const wrapper = document.createElement('div');
+			wrapper.className = 'bar-list';
+			const max = Math.max(...items.map((item) => item.value), 0);
+			items.forEach((item) => {
+				const node = document.createElement('div');
+				node.className = 'bar-item';
+				const label = document.createElement('div');
+				label.className = 'bar-label';
+				const left = document.createElement('span');
+				left.textContent = item.label;
+				const right = document.createElement('strong');
+				right.textContent = formatValue(item.value);
+				label.append(left, right);
+				const track = document.createElement('div');
+				track.className = 'bar-track';
+				const fill = document.createElement('div');
+				fill.className = 'bar-fill';
+				fill.style.width = max > 0 ? ((item.value / max) * 100).toFixed(1) + '%' : '0%';
+				track.appendChild(fill);
+				node.append(label, track);
+				wrapper.appendChild(node);
+			});
+			return wrapper;
+		}
+
+		function objectArrayColumns(rows, preferredKeys) {
+			const discovered = [];
+			rows.slice(0, 20).forEach((row) => {
+				Object.keys(row || {}).forEach((key) => {
+					if (!discovered.includes(key)) { discovered.push(key); }
+				});
+			});
+			const preferred = (preferredKeys || []).filter((key) => discovered.includes(key));
+			const remainder = discovered.filter((key) => !preferred.includes(key));
+			return preferred.concat(remainder).slice(0, 10);
+		}
+
+		function createObjectTable(rows, preferredKeys) {
+			if (!rows.length) {
+				const empty = document.createElement('p');
+				empty.className = 'muted';
+				empty.textContent = 'No rows available.';
+				return empty;
+			}
+			const table = document.createElement('table');
+			const columns = objectArrayColumns(rows, preferredKeys);
+			const thead = document.createElement('thead');
+			const headRow = document.createElement('tr');
+			columns.forEach((column) => {
+				const th = document.createElement('th');
+				th.textContent = formatLabel(column);
+				headRow.appendChild(th);
+			});
+			thead.appendChild(headRow);
+			const tbody = document.createElement('tbody');
+			rows.slice(0, 250).forEach((row) => {
+				const tr = document.createElement('tr');
+				tr.dataset.search = JSON.stringify(row).toLowerCase();
+				columns.forEach((column) => {
+					const td = document.createElement('td');
+					td.textContent = formatValue(row ? row[column] : null);
+					tr.appendChild(td);
+				});
+				tbody.appendChild(tr);
+			});
+			table.append(thead, tbody);
+			return table;
+		}
+
+		function wrapTable(table) {
+			const wrap = document.createElement('div');
+			wrap.className = 'table-wrap';
+			wrap.appendChild(table);
+			return wrap;
+		}
+
+		function renderPrimitiveList(values) {
+			const wrapper = document.createElement('div');
+			wrapper.className = 'chips';
+			values.forEach((value) => wrapper.appendChild(createBadge(formatValue(value), 'neutral')));
+			return wrapper;
+		}
+
+		function renderStructuredValue(value, depth) {
+			const level = depth || 0;
+			if (value === null || value === undefined || value === '') {
+				const empty = document.createElement('span');
+				empty.className = 'muted';
+				empty.textContent = 'None';
+				return empty;
+			}
+			if (typeof value !== 'object') {
+				const span = document.createElement('span');
+				span.textContent = formatValue(value);
+				return span;
+			}
+			if (Array.isArray(value)) {
+				if (!value.length) {
+					const emptyArray = document.createElement('span');
+					emptyArray.className = 'muted';
+					emptyArray.textContent = 'Empty list';
+					return emptyArray;
+				}
+				if (value.every((item) => item === null || ['string', 'number', 'boolean'].includes(typeof item))) {
+					return renderPrimitiveList(value);
+				}
+				if (value.every((item) => isPlainObject(item))) {
+					return wrapTable(createObjectTable(value, []));
+				}
+				const container = document.createElement('div');
+				value.forEach((item, index) => {
+					const details = document.createElement('details');
+					const summary = document.createElement('summary');
+					summary.textContent = summarizeItemLabel(item, index);
+					details.append(summary, renderStructuredValue(item, level + 1));
+					container.appendChild(details);
+				});
+				return container;
+			}
+			const wrapper = document.createElement('div');
+			const primitiveEntries = [];
+			const complexEntries = [];
+			Object.entries(value).forEach(([key, child]) => {
+				const primitiveArray = Array.isArray(child) && child.every((item) => item === null || ['string', 'number', 'boolean'].includes(typeof item)) && child.length <= 12;
+				if (child === null || child === undefined || typeof child !== 'object' || primitiveArray) {
+					primitiveEntries.push([key, child]);
+				} else {
+					complexEntries.push([key, child]);
+				}
+			});
+			if (primitiveEntries.length) {
+				const dl = document.createElement('dl');
+				dl.className = 'key-value';
+				primitiveEntries.forEach(([key, child]) => {
+					const row = document.createElement('div');
+					row.className = 'kv-row';
+					const dt = document.createElement('dt');
+					dt.textContent = formatLabel(key);
+					const dd = document.createElement('dd');
+					if (Array.isArray(child)) {
+						dd.appendChild(renderPrimitiveList(child));
+					} else if (typeof child === 'boolean') {
+						dd.appendChild(createBadge(child ? 'Yes' : 'No', child ? '' : 'neutral'));
+					} else {
+						dd.textContent = formatValue(child);
+					}
+					row.append(dt, dd);
+					dl.appendChild(row);
+				});
+				wrapper.appendChild(dl);
+			}
+			complexEntries.forEach(([key, child]) => {
+				const details = document.createElement('details');
+				const summary = document.createElement('summary');
+				summary.textContent = formatLabel(key);
+				details.append(summary, renderStructuredValue(child, level + 1));
+				wrapper.appendChild(details);
+			});
+			return wrapper;
+		}
+
+		function reportKind() {
+			if (Array.isArray(data.HostPools) || isPlainObject(data.HostPools)) { return 'metrics'; }
+			if (Array.isArray(data.Applications) || data.DiscoveryType === 'LocalAvdHost') { return 'host'; }
+			return 'generic';
+		}
+
+		function heroMetaEntries(kind) {
+			const entries = [
+				['Generated', data.CollectedAt || GENERATED_AT],
+				['Customer', data.CustomerAbbreviation || 'n/a'],
+				['Generated By', data.GeneratedBy || 'n/a'],
+				['Project Code', data.ProjectCode || 'n/a']
+			];
+			if (kind === 'metrics') { entries.push(['Window', (data.LookbackDays || 'n/a') + ' day(s)']); }
+			if (kind === 'host') { entries.push(['Host', data.Machine && data.Machine.Hostname ? data.Machine.Hostname : 'n/a']); }
+			return entries;
+		}
+
+		function metricsSummary() {
+			const hostPools = normalizeCollection(data.HostPools);
+			const storage = normalizeCollection(data.StorageAccountScan);
+			return [
+				{ label: 'Host Pools', value: data.HostPoolCount || hostPools.length, detail: 'AVD pools covered in this export' },
+				{ label: 'Subscriptions', value: data.SubscriptionCount, detail: 'Azure subscriptions scanned' },
+				{ label: 'Authorised Users', value: data.LicenseSummaryUserCount, detail: 'Unique users resolved from access assignments' },
+				{ label: 'Unlicensed Users', value: data.UnlicensedUserCount == null ? 'n/a' : data.UnlicensedUserCount, detail: 'Users with access but no qualifying licence' },
+				{ label: 'Avg CPU', value: average(hostPools.map((item) => toNumber(item.AvgCpuPercent))), detail: 'Mean average CPU across pools' },
+				{ label: 'Avg Memory', value: average(hostPools.map((item) => toNumber(item.AvgMemUsedPercent))), detail: 'Mean memory used percentage across pools' },
+				{ label: 'Peak Sessions', value: Math.max(...hostPools.map((item) => toNumber(item.PeakConcurrentSessions) || 0), 0), detail: 'Highest peak concurrency in any pool' },
+				{ label: 'Storage Scans', value: storage.length, detail: 'Storage accounts in the FSLogix scan set' }
+			];
+		}
+
+		function hostSummary() {
+			const fsLogix = data.FSLogix || {};
+			const sso = data.EntraSso || {};
+			const adDeps = data.ActiveDirectoryDependencies || {};
+			const connectivity = data.AvdConnectivity || {};
+			const fsLogixDiscovered = !!(
+				fsLogix.Installed ||
+				fsLogix.ConfigDetected ||
+				(fsLogix.ServiceStatus && fsLogix.ServiceStatus !== 'NotInstalled') ||
+				toNumber(fsLogix.ProfileContainerCount) > 0 ||
+				normalizeCollection(fsLogix.ProfileLocationInventory).length
+			);
+			const requiredTotal = toNumber(connectivity.RequiredEndpointCount);
+			const requiredPassed = toNumber(connectivity.RequiredReachableCount);
+			let connectivityValue = 'n/a';
+			let connectivityDetail = 'AVD endpoint connectivity checks';
+			if (data.ConnectivityChecksSkipped) {
+				connectivityValue = 'Skipped';
+				connectivityDetail = 'Connectivity checks were skipped for this run';
+			} else if (requiredTotal > 0) {
+				connectivityValue = requiredPassed + '/' + requiredTotal + ' passed';
+				connectivityDetail = connectivity.AllRequiredReachable ? 'All required endpoints reachable' : 'Some required endpoints were unreachable';
+			}
+			return [
+				{ label: 'Applications', value: data.ApplicationCount || normalizeCollection(data.Applications).length, detail: 'Installed apps included in the export' },
+				{ label: 'Join Type', value: data.JoinState && data.JoinState.JoinType ? data.JoinState.JoinType : 'n/a', detail: 'Detected device join state', variant: 'join-type' },
+				{ label: 'FSLogix', value: fsLogixDiscovered ? 'Found' : 'Missing', detail: 'Profile container platform status' },
+				{ label: 'Entra SSO', value: sso.SsoCapable ? 'Capable' : 'Review', detail: 'Host-side SSO readiness summary' },
+				{ label: 'AD Dependencies', value: adDeps.HasDomainDependencies ? 'Present' : 'None', detail: 'Services, tasks, ODBC, and live port usage' },
+				{ label: 'Connectivity', value: connectivityValue, detail: connectivityDetail }
+			];
+		}
+
+		function buildTable(sectionIdPrefix, title, copy, rows, preferredKeys) {
+			if (!rows.length) { return; }
+			document.getElementById(sectionIdPrefix + '-section').classList.remove('hidden');
+			document.getElementById(sectionIdPrefix + '-title').textContent = title;
+			document.getElementById(sectionIdPrefix + '-copy').textContent = copy;
+			const wrap = document.getElementById(sectionIdPrefix + '-wrap');
+			wrap.innerHTML = '';
+			wrap.appendChild(createObjectTable(rows, preferredKeys));
+		}
+
+		function hasRenderableValue(value) {
+			if (value === null || value === undefined || value === '') { return false; }
+			if (Array.isArray(value)) { return value.length > 0; }
+			if (isPlainObject(value)) { return Object.keys(value).length > 0; }
+			return true;
+		}
+
+		function pickObjectFields(source, keys) {
+			const result = {};
+			(keys || []).forEach((key) => {
+				if (!source || !Object.prototype.hasOwnProperty.call(source, key)) { return; }
+				const value = source[key];
+				if (!hasRenderableValue(value)) { return; }
+				result[key] = value;
+			});
+			return result;
+		}
+
+		function createGroupedSection(title, entries) {
+			if (!entries.length) { return null; }
+			const panel = document.createElement('article');
+			panel.className = 'data-card wide';
+			panel.dataset.search = entries.map((entry) => {
+				const key = Array.isArray(entry) ? entry[0] : entry.key;
+				const value = Array.isArray(entry) ? entry[1] : entry.value;
+				return key + ' ' + JSON.stringify(value);
+			}).join(' ').toLowerCase();
+			const head = document.createElement('div');
+			head.className = 'data-card-head';
+			const heading = document.createElement('h3');
+			heading.textContent = title;
+			head.appendChild(heading);
+			const body = document.createElement('div');
+			body.className = 'data-card-body';
+			const grid = document.createElement('div');
+			grid.className = 'section-grid';
+			entries.forEach((entry) => {
+				const key = Array.isArray(entry) ? entry[0] : entry.key;
+				const value = Array.isArray(entry) ? entry[1] : entry.value;
+				const titleText = Array.isArray(entry) ? (key === '__ExecutionContext' ? 'Execution Context' : formatLabel(key)) : (entry.title || (key === '__ExecutionContext' ? 'Execution Context' : formatLabel(key)));
+				const card = document.createElement('article');
+				card.className = 'data-card compact';
+				card.dataset.search = (key + ' ' + JSON.stringify(value)).toLowerCase();
+				const cardHead = document.createElement('div');
+				cardHead.className = 'data-card-head';
+				const cardHeading = document.createElement('h3');
+				cardHeading.textContent = titleText;
+				cardHead.appendChild(cardHeading);
+				const cardBody = document.createElement('div');
+				cardBody.className = 'data-card-body';
+				cardBody.appendChild(renderStructuredValue(value, 0));
+				const actions = createSectionActions(cardBody);
+				if (actions) { cardHead.appendChild(actions); }
+				card.append(cardHead, cardBody);
+				grid.appendChild(card);
+			});
+			body.appendChild(grid);
+			panel.append(head, body);
+			return panel;
+		}
+
+		function buildHostStructuredSections() {
+			const dataGrid = document.getElementById('data-grid');
+			const skip = new Set(['Applications', 'CustomerAbbreviation', 'GeneratedBy', 'ProjectCode', 'CollectedAt', 'CollectionMode', 'RunningAsAccount', 'DiscoveryType', 'PrimaryApplicationsOnly', 'ApplicationCount', 'ConnectivityChecksSkipped']);
+			const groupedKeys = [
+				['System Details', ['__ExecutionContext', 'Machine', 'JoinState', 'TimeSource', 'Antivirus', 'IntuneEnrollment', 'Laps']],
+				['Office Details', ['UserProfileExperience', 'OutlookCachedMode', 'TeamsMediaOptimization', 'RdpRedirection']],
+				['Access And Connectivity', ['EntraSso', 'ActiveDirectoryDependencies', 'AvdConnectivity', 'RdpShortpath']],
+				['Printing And Peripherals', ['UniversalPrint', 'Printers']],
+				['Policy And Configuration', ['GroupPolicy', 'DefaultFileAssociations', 'LanguagePacks']]
+			];
+			const entryMap = new Map(orderedSectionEntries('host', data).filter(([key]) => !skip.has(key)));
+			if (entryMap.has('FSLogix')) {
+				const fsLogix = entryMap.get('FSLogix') || {};
+				const configurationAndComponents = pickObjectFields(fsLogix, [
+					'Installed', 'ServiceName', 'ServiceStatus', 'ConfigDetected', 'EffectiveEnabled', 'CloudCacheInUse', 'CloudCacheLocations', 'CloudCacheLocalCachePath',
+					'VolumeType', 'SizeInMBs', 'IsDynamic', 'FlipFlopProfileDirectoryName', 'DeleteLocalProfileWhenVHDShouldApply', 'ConcurrentUserSessions',
+					'AccessNetworkAsComputerObject', 'OfficeCloudCacheLocations', 'RedirectionsXml', 'AppMasking', 'RawLocalConfig', 'RawPolicyConfig', 'OfficeContainerLocalConfig', 'OfficeContainerPolicyConfig'
+				]);
+				const profileStorageAndInventory = pickObjectFields(fsLogix, [
+					'ProfileLocations', 'ProfileLocationInventory', 'ProfileContainerCount', 'ProfileContainerTotalBytes', 'ProfileContainerTotalGB'
+				]);
+				const fsLogixEntries = [];
+				if (Object.keys(configurationAndComponents).length) {
+					fsLogixEntries.push({ key: 'FSLogixConfiguration', title: 'Configuration And Components', value: configurationAndComponents });
+				}
+				if (Object.keys(profileStorageAndInventory).length) {
+					fsLogixEntries.push({ key: 'FSLogixProfileStorage', title: 'Profile Storage And Inventory', value: profileStorageAndInventory });
+				}
+				const fsLogixSection = createGroupedSection('FSLogix', fsLogixEntries);
+				if (fsLogixSection) { dataGrid.appendChild(fsLogixSection); }
+				entryMap.delete('FSLogix');
+			}
+			groupedKeys.forEach(([title, keys]) => {
+				const entries = keys.filter((key) => entryMap.has(key)).map((key) => [key, entryMap.get(key)]);
+				keys.forEach((key) => entryMap.delete(key));
+				const section = createGroupedSection(title, entries);
+				if (section) { dataGrid.appendChild(section); }
+			});
+			const remaining = Array.from(entryMap.entries());
+			const remainderSection = createGroupedSection('Additional Details', remaining);
+			if (remainderSection) { dataGrid.appendChild(remainderSection); }
+		}
+
+		function buildStructuredSections(kind) {
+			if (kind === 'host') {
+				buildHostStructuredSections();
+				return;
+			}
+			const dataGrid = document.getElementById('data-grid');
+			const skip = kind === 'metrics'
+				? new Set(['StorageAccountScan'])
+				: new Set(['Applications', 'CustomerAbbreviation', 'GeneratedBy', 'ProjectCode', 'CollectedAt', 'CollectionMode', 'RunningAsAccount', 'DiscoveryType', 'PrimaryApplicationsOnly', 'ApplicationCount']);
+			orderedSectionEntries(kind, data).forEach(([key, value]) => {
+				if (skip.has(key)) { return; }
+				const panel = document.createElement('article');
+				panel.className = 'data-card ' + (kind === 'host' ? 'compact' : (isWideSection(key, value, kind) ? 'wide' : 'compact'));
+				panel.dataset.search = (key + ' ' + JSON.stringify(value)).toLowerCase();
+				const head = document.createElement('div');
+				head.className = 'data-card-head';
+				const heading = document.createElement('h3');
+				heading.textContent = key === '__ExecutionContext' ? 'Execution Context' : formatLabel(key);
+				head.appendChild(heading);
+				const body = document.createElement('div');
+				body.className = 'data-card-body';
+				body.appendChild(renderStructuredValue(value, 0));
+				const actions = createSectionActions(body);
+				if (actions) { head.appendChild(actions); }
+				panel.append(head, body);
+				dataGrid.appendChild(panel);
+			});
+		}
+
+		function init() {
+			const kind = reportKind();
+			document.getElementById('report-title').textContent = REPORT_TITLE;
+			const heroMeta = document.getElementById('hero-meta');
+			heroMetaEntries(kind).forEach(([label, value]) => {
+				const chip = document.createElement('div');
+				chip.className = 'chip';
+				chip.innerHTML = '<strong>' + label + ':</strong> <span>' + String(formatValue(value)).replace(/</g, '&lt;') + '</span>';
+				heroMeta.appendChild(chip);
+			});
+			document.getElementById('source-note').textContent = SOURCE_JSON ? 'Source JSON: ' + SOURCE_JSON : 'Generated: ' + GENERATED_AT;
+			document.getElementById('raw-json').textContent = JSON.stringify(data, null, 2);
+			const kpis = kind === 'metrics' ? metricsSummary() : kind === 'host' ? hostSummary() : Object.keys(data).slice(0, 8).map((key) => ({ label: key, value: data[key], detail: 'Top-level field' }));
+			const kpiGrid = document.getElementById('kpi-grid');
+			kpis.forEach((item) => kpiGrid.appendChild(createSummaryCard(item.label, item.value, item.detail, item.variant)));
+			if (kind === 'metrics') {
+				buildTable('primary-table', 'Host Pools', 'Per-pool operational and performance summary.', normalizeCollection(data.HostPools), ['Name', 'SubscriptionName', 'Location', 'HostPoolType', 'HostCount', 'AvgCpuPercent', 'AvgMemUsedPercent', 'PeakConcurrentSessions', 'TotalFailedConnections', 'DiagnosticsStatus']);
+				buildTable('secondary-table', 'Storage Accounts', 'FSLogix storage scan results included in the export.', normalizeCollection(data.StorageAccountScan), ['StorageAccountName', 'SubscriptionName', 'ResourceGroup', 'Location', 'SkuName', 'PublicNetworkAccess', 'PrivateEndpointCount', 'DefaultAction', 'FileShareCount']);
+			} else if (kind === 'host') {
+				buildTable('primary-table', 'Applications', 'Installed application inventory from the host export.', normalizeCollection(data.Applications), ['Name', 'Publisher', 'InstallDate', 'Version', 'InstallLocation']);
+			}
+			buildStructuredSections(kind);
+		}
+
+		init();
+	</script>
+</body>
+</html>
+'@
+
+	$htmlContent = $htmlTemplate.Replace('__REPORT_TITLE__', $titleJson)
+	$htmlContent = $htmlContent.Replace('__REPORT_TITLE_HTML__', $titleHtml)
+	$htmlContent = $htmlContent.Replace('__SOURCE_JSON__', $sourceJson)
+	$htmlContent = $htmlContent.Replace('__GENERATED_AT__', $generatedAtJson)
+	$htmlContent = $htmlContent.Replace('__REPORT_PAYLOAD__', ($payloadB64 | ConvertTo-Json -Compress))
+
+	Set-Content -Path $OutputPath -Value $htmlContent -Encoding UTF8
+	return $OutputPath
+}
+
 # ------------------------------------------------------------------
 # Console output helpers
 # ------------------------------------------------------------------
 
 $script:_checkLabel   = ''
 $script:_ansiSupported = $host.Name -notmatch 'ISE'
+$script:_spinnerSupported = $false
+$script:_progressId = 1
+
+try {
+	$script:_spinnerSupported = $script:_ansiSupported -and [Environment]::UserInteractive -and -not [Console]::IsOutputRedirected -and -not [Console]::IsInputRedirected
+} catch {
+	$script:_spinnerSupported = $false
+}
 
 function Format-Ansi {
 	param([string]$Text)
 	if ($script:_ansiSupported) { return $Text }
 	return ($Text -replace "`e\[[0-9;]*[mK]", '')
+}
+
+function Write-LiveProgress {
+	param(
+		[string]$Activity,
+		[string]$Status,
+		[int]$Pct = -1,
+		[switch]$Completed
+	)
+
+	if ($script:_spinnerSupported) { return }
+
+	$progressParams = @{
+		Id          = $script:_progressId
+		Activity    = $Activity
+		Status      = $Status
+	}
+
+	if ($Pct -ge 0) {
+		$progressParams['PercentComplete'] = [Math]::Min([Math]::Max($Pct, 0), 100)
+	}
+
+	if ($Completed.IsPresent) {
+		$progressParams['Completed'] = $true
+	}
+
+	try { Write-Progress @progressParams } catch { }
 }
 
 function Write-Banner {
@@ -2659,10 +3962,37 @@ function Start-SpinnerRunspace {
 		$frames = @('|', '/', '-', '\')
 		$idx    = 0
 		$purple = "`e[95m"; $bold = "`e[1m"; $dim = "`e[2m"; $reset = "`e[0m"
+		function Get-TrimmedSpinnerStatus {
+			param(
+				[string]$Activity,
+				[string]$Status,
+				[int]$Pct
+			)
+
+			$maxWidth = 0
+			try { $maxWidth = [Math]::Max([Console]::WindowWidth - 1, 0) } catch { $maxWidth = 0 }
+			if ($maxWidth -le 0) { return $Status }
+
+			$barWidth = if ($Pct -ge 0) { 28 } else { 0 }
+			$reservedWidth = 6 + $Activity.Length + $barWidth
+			$availableStatusWidth = [Math]::Max($maxWidth - $reservedWidth, 12)
+
+			if ([string]::IsNullOrEmpty($Status) -or $Status.Length -le $availableStatusWidth) {
+				return $Status
+			}
+
+			if ($availableStatusWidth -le 3) {
+				return $Status.Substring(0, [Math]::Min($Status.Length, $availableStatusWidth))
+			}
+
+			return $Status.Substring(0, $availableStatusWidth - 3) + '...'
+		}
+
 		while ($_st.Run) {
 			if (-not $_st.Active) { Start-Sleep -Milliseconds 50; continue }
 			$s   = $frames[$idx % 4]; $idx++
 			$act = $_st.Activity; $sts = $_st.Status; $pct = $_st.Pct
+			$sts = Get-TrimmedSpinnerStatus -Activity $act -Status $sts -Pct $pct
 			$barStr = ''
 			if ($pct -ge 0) {
 				$w = 20; $f = [Math]::Min([int]($pct / 100.0 * $w), $w)
@@ -2698,18 +4028,26 @@ function Write-SpinnerLine {
 
 function Clear-SpinnerLine {
 	Stop-SpinnerRunspace
-	if ($script:_ansiSupported) { [Console]::Write("`r`e[K") }
+	Write-LiveProgress -Activity 'AVD Session Host Audit' -Status 'Complete' -Completed
+	if ($script:_spinnerSupported) {
+		try { [Console]::Write("`r`e[K") } catch { }
+	}
+	try { [Console]::WriteLine() } catch { Write-Host '' }
 }
 
 function Write-CheckStart {
 	param([string]$Name, [int]$Indent = 4)
 	$script:_checkLabel = (' ' * $Indent) + $Name.PadRight(30) + '  '
-	if ($script:_progressTotal -gt 0 -and $script:_ansiSupported) {
+	$_pct = -1
+	if ($script:_progressTotal -gt 0 -and $script:_spinnerSupported) {
 		$_pct = [Math]::Min([int](($script:_progressStep / $script:_progressTotal) * 100), 100)
 		$script:_spinnerState.Status   = $Name
 		$script:_spinnerState.Pct      = $_pct
 		$script:_spinnerState.Active   = $true
 		Start-SpinnerRunspace
+	} elseif ($script:_progressTotal -gt 0) {
+		$_pct = [Math]::Min([int](($script:_progressStep / $script:_progressTotal) * 100), 100)
+		Write-LiveProgress -Activity 'AVD Session Host Audit' -Status $Name -Pct $_pct
 	}
 }
 
@@ -2726,7 +4064,7 @@ function Write-CheckResult {
 		'Info'    { "`e[90m"  }  # Dark gray
 	}
 	$suffix = if ($Detail) { "  ($Detail)" } else { '' }
-	if ($script:_progressTotal -gt 0 -and $script:_ansiSupported) {
+	if ($script:_progressTotal -gt 0 -and $script:_spinnerSupported) {
 		$script:_spinnerState.Active = $false  # pause spinner between checks
 		[void]$script:_spinnerState.Lock.Wait()  # wait for any in-flight frame to finish
 		try {
@@ -2737,6 +4075,12 @@ function Write-CheckResult {
 		}
 		$script:_progressStep++
 	} else {
+		if ($script:_progressTotal -gt 0) {
+			$_pct = [Math]::Min([int]((($script:_progressStep + 1) / $script:_progressTotal) * 100), 100)
+			$_progressStatus = "$($script:_checkLabel.Trim())$Status$suffix"
+			Write-LiveProgress -Activity 'AVD Session Host Audit' -Status $_progressStatus -Pct $_pct
+			$script:_progressStep++
+		}
 		$color = switch ($Status) {
 			'Success' { 'Green'   }
 			'Skipped' { 'Yellow'  }
@@ -2931,6 +4275,8 @@ try {
 		ForEach-Object { [regex]::Replace($_, '(?m)^(    )+', { param($m) '  ' * ($m.Value.Length / 4) }) } |
 		ForEach-Object { $_ -replace ':  ', ': ' } |
 		Set-Content -Path $resolvedOutputPath -Encoding UTF8
+	$resolvedHtmlPath = [System.IO.Path]::ChangeExtension($resolvedOutputPath, '.html')
+	Write-AvdHtmlReport -Data $exportObject -OutputPath $resolvedHtmlPath -Title "AVD Host Audit Report - $($machineDetails.Hostname)" -SourceJsonFileName (Split-Path $resolvedOutputPath -Leaf) | Out-Null
 
 	$_elapsed = $scriptStopwatch.Elapsed
 	$_elapsedStr = if ($_elapsed.TotalMinutes -ge 1) {
@@ -2941,12 +4287,14 @@ try {
 	Write-Host (Format-Ansi "  `e[92mDiscovery complete in $_elapsedStr`e[0m")
 	Write-Host "  Applications  :  $(@($installedApps).Count)" -ForegroundColor DarkGray
 	Write-Host "  Output file   :  $resolvedOutputPath" -ForegroundColor Cyan
+	Write-Host "  HTML report   :  $resolvedHtmlPath" -ForegroundColor Cyan
 	if ($null -ne $groupPolicyDiscovery -and $groupPolicyDiscovery.Succeeded) {
 		Write-Host "  GP report     :  $gpResultHtmlPath" -ForegroundColor Cyan
 	}
 	Write-Host ''
 }
 catch {
+	try { Clear-SpinnerLine } catch { }
 	$errLocation = if ($_.InvocationInfo) { " [line $($_.InvocationInfo.ScriptLineNumber)]" } else { '' }
 	Write-Error "Failed to discover applications or write JSON output.${errLocation} $($_.Exception.Message)"
 	exit 1
