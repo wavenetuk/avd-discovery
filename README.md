@@ -4,8 +4,8 @@ Two read-only PowerShell scripts for assessing AVD environments. No Azure resour
 
 | Script | Runs on | Output |
 |---|---|---|
-| `scripts/Invoke-AvdMetricsCollection.ps1` | Local machine | `output/avd-metrics/<customer>-avd-metrics-<timestamp>.json` |
-| `scripts/Invoke-AvdSessionHostAudit.ps1` | AVD session host | `output/vm-discovery/<customer>-<hostname>-avd-discovery-<timestamp>.json` |
+| `scripts/Invoke-AvdMetricsCollection.ps1` | Local machine | `output/avd-metrics/<customer>-avd-metrics-<timestamp>.json` plus a sibling `.html` report |
+| `scripts/Invoke-AvdSessionHostAudit.ps1` | AVD session host | `output/vm-discovery/<customer>-<hostname>-avd-discovery-<timestamp>.json` plus a sibling `.html` report |
 
 `Invoke-AvdMetricsCollection.ps1` can run `Invoke-AvdSessionHostAudit.ps1` automatically on a live session host via Azure VM Run Command (`-RunLocalDiscovery`).
 
@@ -61,6 +61,8 @@ Enumerates all AVD host pools across one or more subscriptions.
 **Licence Assignments** *(Microsoft Graph)*
 - AVD-relevant SKUs per user (Windows 365, M365/O365 suites, Visio, Project, Power BI, Intune/EMS, Defender, AVD Store)
 - Users with role assignments but no qualifying licence
+
+Both scripts also emit a self-contained HTML companion report next to the JSON export for easier review, filtering, and drill-down.
 
 ### Parameters
 
@@ -272,9 +274,11 @@ avd-discovery/
 │   └── ms-service-plan-ids.csv
 ├── output/
 │   ├── avd-metrics/
-│   │   └── <customer>-avd-metrics-<timestamp>.json
+│   │   ├── <customer>-avd-metrics-<timestamp>.json
+│   │   └── <customer>-avd-metrics-<timestamp>.html
 │   └── vm-discovery/
 │       ├── <customer>-<host>-avd-discovery-<timestamp>.json
+│       ├── <customer>-<host>-avd-discovery-<timestamp>.html
 │       └── <customer>-<host>-gpresult-<timestamp>.html
 └── README.md
 ```

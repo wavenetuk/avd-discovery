@@ -173,6 +173,14 @@ from the GitHub repository (https://github.com/wavenetuk/avd-discovery) during
 -RunLocalDiscovery execution. Defaults to 'main'. Use a feature branch name when
 testing changes that have not yet been merged.
 
+.PARAMETER GeneratedBy
+Engineer name recorded in the export and HTML report. If omitted, the script prompts
+for a non-empty value before collection starts.
+
+.PARAMETER ProjectCode
+Project code recorded in the export and HTML report. If omitted, the script prompts
+for a non-empty value before collection starts.
+
 .EXAMPLE
 .\Invoke-AvdMetricsCollection.ps1
 
@@ -315,6 +323,24 @@ function Get-CustomerAbbreviation {
 	return $abbreviation.ToLowerInvariant()
 }
 
+function Get-RequiredTextValue {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Prompt,
+
+		[Parameter(Mandatory = $false)]
+		[AllowNull()]
+		[string]$Value
+	)
+
+	$resolvedValue = if (-not [string]::IsNullOrWhiteSpace($Value)) { $Value.Trim() } else { $null }
+	while ([string]::IsNullOrWhiteSpace($resolvedValue)) {
+		$resolvedValue = (Read-Host $Prompt).Trim()
+	}
+
+	return $resolvedValue
+}
+
 function New-ExportFilePath {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -327,6 +353,1823 @@ function New-ExportFilePath {
 	$timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 	$fileName = '{0}-avd-metrics-{1}.json' -f $CustomerCode, $timestamp
 	return Join-Path -Path $Directory -ChildPath $fileName
+}
+
+function Write-AvdHtmlReport {
+	param(
+		[Parameter(Mandatory = $true)]
+		$Data,
+
+		[Parameter(Mandatory = $true)]
+		[string]$OutputPath,
+
+		[Parameter(Mandatory = $true)]
+		[string]$Title,
+
+		[Parameter(Mandatory = $false)]
+		[string]$SourceJsonFileName
+	)
+
+	$resolvedTitle = $Title
+	$looksLikeCommand = -not [string]::IsNullOrWhiteSpace($resolvedTitle) -and (
+		($resolvedTitle.Length -gt 120 -and (
+			$resolvedTitle -match '(?i)(Get-Location|ParseFile|Write-AvdHtmlReport|ConvertFrom-Json|Join-Path)' -or
+			($resolvedTitle -match '\$[A-Za-z_][A-Za-z0-9_]*' -and $resolvedTitle -match ';')
+		)) -or
+		$resolvedTitle -match '(?i)(^|\s)(?:\.\\|[A-Za-z]:\\)[^\r\n]+\.ps1\b.*\s-[A-Za-z][A-Za-z0-9]*'
+	)
+	if ([string]::IsNullOrWhiteSpace($resolvedTitle) -or $looksLikeCommand) {
+		if ($Data.PSObject.Properties['HostPools']) {
+			$resolvedTitle = if ([string]::IsNullOrWhiteSpace($Data.CustomerAbbreviation)) { 'AVD Metrics Report' } else { "AVD Metrics Report - $($Data.CustomerAbbreviation)" }
+		}
+		elseif ($Data.PSObject.Properties['Machine']) {
+			$resolvedTitle = if ($Data.Machine -and -not [string]::IsNullOrWhiteSpace($Data.Machine.Hostname)) { "AVD Host Audit Report - $($Data.Machine.Hostname)" } else { 'AVD Host Audit Report' }
+		}
+		else {
+			$resolvedTitle = 'AVD Discovery Report'
+		}
+	}
+
+	$jsonPayload = $Data | ConvertTo-Json -Depth 12 -Compress
+	$payloadB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($jsonPayload))
+	$titleJson = $resolvedTitle | ConvertTo-Json -Compress
+	$titleHtml = [System.Net.WebUtility]::HtmlEncode($resolvedTitle)
+	$sourceJson = $SourceJsonFileName | ConvertTo-Json -Compress
+	$generatedAtJson = (Get-Date).ToString('s') | ConvertTo-Json -Compress
+
+	$htmlTemplate = @'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>__REPORT_TITLE_HTML__</title>
+	<style>
+		:root {
+			--bg: #eef1f4;
+			--bg-2: #ffffff;
+			--panel: rgba(255, 255, 255, 0.78);
+			--panel-2: rgba(247, 249, 251, 0.84);
+			--panel-soft: rgba(0, 109, 203, 0.08);
+			--text: #1d252c;
+			--muted: #66727d;
+			--accent: #006dcb;
+			--accent-2: #0058a8;
+			--accent-3: #7fb9ea;
+			--line: rgba(29, 37, 44, 0.12);
+			--shadow: 0 18px 42px rgba(29, 37, 44, 0.08);
+			--block-inner-shadow: inset 0 0 26px rgba(29, 37, 44, 0.035), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+			--radius: 20px;
+		}
+		* { box-sizing: border-box; }
+		body {
+			margin: 0;
+			font-family: "Segoe UI", "Aptos", system-ui, sans-serif;
+			color: var(--text);
+			background:
+				radial-gradient(circle at top left, rgba(0, 109, 203, 0.08), transparent 22%),
+				radial-gradient(circle at top right, rgba(0, 109, 203, 0.06), transparent 28%),
+				radial-gradient(circle at 50% 120%, rgba(29, 37, 44, 0.05), transparent 34%),
+				linear-gradient(180deg, var(--bg-2) 0%, var(--bg) 100%);
+			background-attachment: fixed;
+			position: relative;
+			overflow-x: hidden;
+		}
+		body::before,
+		body::after {
+			content: "";
+			position: fixed;
+			inset: auto;
+			pointer-events: none;
+			filter: blur(52px);
+			opacity: 0.22;
+			z-index: 0;
+		}
+		body::before {
+			top: 72px;
+			left: -120px;
+			width: 320px;
+			height: 320px;
+			background: radial-gradient(circle, rgba(0, 109, 203, 0.08), transparent 68%);
+		}
+		body::after {
+			right: -100px;
+			bottom: 48px;
+			width: 280px;
+			height: 280px;
+			background: radial-gradient(circle, rgba(29, 37, 44, 0.06), transparent 68%);
+		}
+		.page {
+			width: min(1500px, calc(100vw - 32px));
+			margin: 24px auto 40px;
+			position: relative;
+			z-index: 1;
+		}
+		.hero {
+			padding: 28px;
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			border-radius: 28px;
+			background:
+				linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(248, 249, 251, 0.98) 44%, rgba(240, 246, 252, 0.98)),
+				radial-gradient(circle at top right, rgba(0, 109, 203, 0.08), transparent 32%);
+			color: var(--text);
+			box-shadow: 0 18px 42px rgba(29, 37, 44, 0.08), var(--block-inner-shadow);
+			backdrop-filter: blur(18px) saturate(114%);
+			-webkit-backdrop-filter: blur(18px) saturate(114%);
+			position: relative;
+			overflow: hidden;
+		}
+		.hero::after {
+			content: "";
+			position: absolute;
+			inset: auto -70px -90px auto;
+			width: 240px;
+			height: 240px;
+			border-radius: 50%;
+			background: radial-gradient(circle, rgba(0, 109, 203, 0.06), transparent 66%);
+			pointer-events: none;
+		}
+		.hero::before {
+			content: "";
+			position: absolute;
+			inset: 0;
+			background: linear-gradient(135deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.08) 24%, transparent 48%);
+			pointer-events: none;
+		}
+		.hero h1 {
+			margin: 0 0 10px;
+			font-size: clamp(28px, 4vw, 42px);
+			line-height: 1.05;
+			letter-spacing: -0.03em;
+			color: #000000;
+		}
+		.hero p {
+			margin: 0;
+			max-width: 80ch;
+			color: rgba(102, 114, 125, 0.95);
+			line-height: 1.5;
+			overflow-wrap: anywhere;
+		}
+		.hero-meta, .kpi-grid {
+			display: grid;
+			gap: 12px;
+		}
+		.hero-meta {
+			margin-top: 18px;
+			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		}
+		.chip {
+			display: inline-flex;
+			align-items: center;
+			flex-wrap: wrap;
+			gap: 6px;
+			padding: 10px 16px;
+			border-radius: 999px;
+			background: rgba(255, 255, 255, 0.82);
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			box-shadow: 0 10px 22px rgba(29, 37, 44, 0.05), inset 0 0 18px rgba(29, 37, 44, 0.03), inset 0 1px 0 rgba(255, 255, 255, 0.66);
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+			font-size: 13px;
+			letter-spacing: 0.02em;
+			min-width: 0;
+			overflow-wrap: anywhere;
+		}
+		.chip strong,
+		.chip span {
+			min-width: 0;
+			overflow-wrap: anywhere;
+		}
+		.toolbar {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 12px;
+			align-items: center;
+			justify-content: space-between;
+			margin: 18px 0 14px;
+		}
+		.toolbar-left {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px;
+			align-items: center;
+			min-width: 0;
+		}
+		.toolbar input {
+			width: min(420px, 100%);
+			padding: 13px 16px;
+			border: 1px solid rgba(29, 37, 44, 0.12);
+			border-radius: 14px;
+			background: rgba(255, 255, 255, 0.88);
+			color: var(--text);
+			outline: none;
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66);
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+		}
+		.toolbar input::placeholder {
+			color: rgba(102, 114, 125, 0.72);
+		}
+		.toolbar .note {
+			color: var(--muted);
+			font-size: 14px;
+			overflow-wrap: anywhere;
+		}
+		.kpi-grid {
+			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+			margin-bottom: 18px;
+		}
+		.card, .section, .data-card {
+			background: var(--panel);
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			border-radius: var(--radius);
+			box-shadow: 0 14px 30px rgba(29, 37, 44, 0.07), inset 0 0 24px rgba(29, 37, 44, 0.03), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+		}
+		.card {
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(244, 248, 252, 0.88));
+			border: 1px solid rgba(255, 255, 255, 0.68);
+			box-shadow: 0 0 22px rgba(29, 37, 44, 0.10), 0 0 40px rgba(29, 37, 44, 0.07), inset 0 0 30px rgba(29, 37, 44, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.88), inset 0 -18px 32px rgba(255, 255, 255, 0.18);
+			backdrop-filter: blur(16px) saturate(128%);
+			-webkit-backdrop-filter: blur(16px) saturate(128%);
+			display: flex;
+			flex-direction: column;
+			justify-content: space-between;
+			gap: 6px;
+			padding: 18px 18px 16px 22px;
+			min-height: 118px;
+			position: relative;
+			overflow: hidden;
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(247, 250, 253, 0.97) 58%, rgba(241, 247, 252, 0.92));
+		}
+		.card::before {
+			content: "";
+			position: absolute;
+			inset: 0 auto 0 0;
+			width: 4px;
+			background: linear-gradient(180deg, var(--accent-3), var(--accent));
+		}
+		.card::after {
+			content: "";
+			position: absolute;
+			inset: 0;
+			background:
+				linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.08) 34%, transparent 72%),
+				linear-gradient(180deg, rgba(0, 109, 203, 0.045), transparent 38%),
+				radial-gradient(circle at top left, rgba(255, 255, 255, 0.28), transparent 34%),
+				radial-gradient(circle at top right, rgba(0, 109, 203, 0.05), transparent 28%);
+			pointer-events: none;
+		}
+		.card > * {
+			position: relative;
+			z-index: 1;
+		}
+		.eyebrow {
+			margin: 0;
+			color: #101828;
+			font-size: 12px;
+			font-weight: 700;
+			letter-spacing: 0.10em;
+			text-transform: uppercase;
+			line-height: 1.35;
+		}
+		.metric {
+			margin: 0;
+			font-size: clamp(28px, 3vw, 36px);
+			line-height: 1;
+			letter-spacing: -0.04em;
+			overflow-wrap: anywhere;
+		}
+		.subtle {
+			margin: 0;
+			color: var(--muted);
+			font-size: 13px;
+			line-height: 1.35;
+			overflow-wrap: anywhere;
+		}
+		.section {
+			padding: 20px;
+			margin-top: 16px;
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 248, 250, 0.96));
+			position: relative;
+			overflow: hidden;
+		}
+		.section::before,
+		.data-card::before {
+			content: "";
+			position: absolute;
+			inset: 0 0 auto 0;
+			height: 1px;
+			background: linear-gradient(90deg, rgba(0, 109, 203, 0.18), rgba(0, 109, 203, 0.02));
+			pointer-events: none;
+		}
+		.section h2 {
+			margin: 0 0 8px;
+			font-size: 22px;
+			letter-spacing: -0.02em;
+			color: #000000;
+		}
+		.section > p {
+			margin: 0 0 14px;
+			color: var(--muted);
+			line-height: 1.45;
+			overflow-wrap: anywhere;
+		}
+		.stat-list {
+			display: grid;
+			gap: 8px;
+		}
+		.stat-row {
+			display: grid;
+			grid-template-columns: minmax(170px, 220px) minmax(0, 1fr);
+			align-items: flex-start;
+			gap: 12px;
+			padding-bottom: 8px;
+			border-bottom: 1px solid var(--line);
+			font-size: 14px;
+		}
+		.stat-row:last-child { border-bottom: 0; padding-bottom: 0; }
+		.stat-row strong {
+			min-width: 0;
+			overflow-wrap: anywhere;
+			word-break: break-word;
+		}
+		.muted { color: var(--muted); }
+		.bar-list {
+			display: grid;
+			gap: 10px;
+		}
+		.bar-item {
+			display: grid;
+			gap: 6px;
+		}
+		.bar-label {
+			display: flex;
+			justify-content: space-between;
+			align-items: flex-start;
+			flex-wrap: wrap;
+			gap: 16px;
+			font-size: 13px;
+			color: var(--muted);
+			min-width: 0;
+		}
+		.bar-track {
+			height: 12px;
+			border-radius: 999px;
+			background: rgba(0, 109, 203, 0.10);
+			overflow: hidden;
+		}
+		.bar-fill {
+			height: 100%;
+			border-radius: inherit;
+			background: linear-gradient(90deg, var(--accent-3), var(--accent), var(--accent-2));
+		}
+		table {
+			width: 100%;
+			border-collapse: collapse;
+			font-size: 14px;
+			min-width: 760px;
+		}
+		th, td {
+			padding: 12px 10px;
+			text-align: left;
+			vertical-align: top;
+			border-bottom: 1px solid var(--line);
+			white-space: nowrap;
+			overflow-wrap: normal;
+			word-break: normal;
+		}
+		th {
+			font-size: 12px;
+			text-transform: uppercase;
+			letter-spacing: 0.08em;
+			color: var(--muted);
+		}
+		tbody tr:hover {
+			background: rgba(0, 109, 203, 0.06);
+		}
+		tr.detail-row:hover {
+			background: transparent;
+		}
+		tr.detail-row > td {
+			white-space: normal;
+			padding-top: 0;
+			padding-bottom: 16px;
+			border-bottom: 1px solid var(--line);
+		}
+		.table-detail {
+			margin-top: 2px;
+		}
+		.table-detail > summary {
+			font-size: 12px;
+			font-weight: 700;
+			color: var(--muted);
+		}
+		.table-detail[open] > summary {
+			margin-bottom: 10px;
+		}
+		.table-wrap {
+			overflow-x: auto;
+			overflow-y: hidden;
+			width: 100%;
+			max-width: 100%;
+			border-radius: 14px;
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			background: rgba(250, 251, 252, 0.76);
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+		}
+		.badge {
+			display: inline-flex;
+			align-items: center;
+			padding: 4px 9px;
+			border-radius: 999px;
+			background: rgba(0, 109, 203, 0.12);
+			color: #0058a8;
+			font-size: 12px;
+			font-weight: 700;
+			letter-spacing: 0.03em;
+			max-width: 100%;
+			overflow-wrap: anywhere;
+		}
+		.badge.neutral {
+			background: rgba(29, 37, 44, 0.08);
+			color: #52606c;
+		}
+		.badge.tier-gold {
+			background: rgba(191, 145, 0, 0.18);
+			color: #8a6400;
+		}
+		.badge.tier-red {
+			background: rgba(181, 39, 45, 0.16);
+			color: #a1232a;
+		}
+		.badge.tier-blue {
+			background: rgba(0, 92, 168, 0.16);
+			color: #0058a8;
+		}
+		.badge.tier-slate {
+			background: rgba(66, 84, 102, 0.15);
+			color: #425466;
+		}
+		details {
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			border-radius: 14px;
+			background: rgba(248, 249, 251, 0.80);
+			padding: 10px 12px;
+			overflow: hidden;
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+		}
+		details + details { margin-top: 10px; }
+		summary {
+			cursor: pointer;
+			font-weight: 700;
+			color: var(--text);
+			overflow-wrap: anywhere;
+		}
+		.section-grid {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 14px;
+		}
+		.data-card {
+			padding: 0;
+			overflow: hidden;
+			background: linear-gradient(180deg, rgba(255, 255, 255, 1), rgba(246, 248, 250, 1));
+			position: relative;
+		}
+		.data-card.wide {
+			grid-column: 1 / -1;
+		}
+		.data-card.compact .data-card-body {
+			padding-top: 12px;
+		}
+		.data-card.compact .key-value {
+			gap: 6px;
+		}
+		.data-card-head {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 12px;
+			padding: 14px 18px;
+			border-bottom: 1px solid rgba(29, 37, 44, 0.08);
+			background: linear-gradient(90deg, rgba(0, 109, 203, 0.08), rgba(0, 109, 203, 0.015));
+		}
+		.data-card-head h3 {
+			margin: 0;
+			font-size: 17px;
+			letter-spacing: -0.02em;
+			overflow-wrap: anywhere;
+			flex: 1 1 auto;
+			color: #000000;
+		}
+		.section-actions {
+			display: flex;
+			gap: 8px;
+			flex: 0 0 auto;
+		}
+		.section-button {
+			appearance: none;
+			border: 1px solid rgba(29, 37, 44, 0.12);
+			background: #ffffff;
+			color: var(--text);
+			border-radius: 999px;
+			padding: 7px 12px;
+			font: inherit;
+			font-size: 12px;
+			font-weight: 700;
+			letter-spacing: 0.03em;
+			cursor: pointer;
+		}
+		.section-button:hover {
+			background: rgba(0, 109, 203, 0.04);
+		}
+		td details.inline-detail {
+			margin: 0;
+			padding: 8px 10px;
+			background: rgba(244, 247, 250, 0.98);
+		}
+		td details.inline-detail > summary {
+			font-size: 12px;
+			font-weight: 600;
+			color: var(--muted);
+		}
+		td details.inline-detail[open] > summary {
+			margin-bottom: 8px;
+		}
+		td details.inline-detail > .table-wrap,
+		td details.inline-detail > .key-value,
+		td details.inline-detail > details,
+		td details.inline-detail > div {
+			margin-top: 8px;
+		}
+		.detail-summary {
+			display: inline-flex;
+			align-items: center;
+			max-width: min(320px, 100%);
+			padding: 5px 10px;
+			border-radius: 999px;
+			background: rgba(0, 109, 203, 0.09);
+			color: #0058a8;
+			font-size: 12px;
+			font-weight: 700;
+			line-height: 1.35;
+			white-space: normal;
+			overflow-wrap: anywhere;
+		}
+		.detail-stack {
+			display: grid;
+			gap: 10px;
+		}
+		.structured-detail {
+			margin-top: 4px;
+		}
+		.structured-detail-grid {
+			display: grid;
+			gap: 10px;
+			margin-top: 10px;
+		}
+		.structured-detail-grid > details {
+			background: rgba(252, 253, 254, 0.82);
+		}
+		.share-list {
+			display: grid;
+			gap: 10px;
+		}
+		.share-item {
+			padding: 12px;
+			border-radius: 14px;
+			background: rgba(247, 249, 251, 0.98);
+			border: 1px solid rgba(29, 37, 44, 0.10);
+		}
+		.share-title {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 10px;
+			margin-bottom: 8px;
+		}
+		.share-title strong {
+			word-break: break-word;
+			color: #000000;
+		}
+		.share-meta {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 6px;
+		}
+		.share-meta .badge {
+			font-size: 0.72rem;
+		}
+		.pool-stack {
+			display: grid;
+			gap: 16px;
+		}
+		.pool-panel {
+			padding: 18px;
+			border-radius: 18px;
+			border: 1px solid rgba(29, 37, 44, 0.10);
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 248, 250, 0.96));
+			box-shadow: 0 16px 34px rgba(29, 37, 44, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.64);
+			backdrop-filter: blur(12px) saturate(108%);
+			-webkit-backdrop-filter: blur(12px) saturate(108%);
+			position: relative;
+			overflow: hidden;
+		}
+		.pool-panel::after {
+			content: "";
+			position: absolute;
+			inset: 0;
+			background:
+				linear-gradient(180deg, rgba(0, 109, 203, 0.02), transparent 32%),
+				radial-gradient(circle at top left, rgba(0, 109, 203, 0.025), transparent 32%);
+			pointer-events: none;
+		}
+		.pool-panel h3 {
+			margin: 0 0 6px;
+			font-size: 22px;
+			letter-spacing: -0.03em;
+			color: #000000;
+		}
+		.pool-panel > p {
+			margin: 0 0 14px;
+			color: var(--muted);
+		}
+		.pool-grid {
+			display: grid;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			gap: 12px;
+		}
+		.pool-grid.featured {
+			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+			margin-bottom: 12px;
+		}
+		.pool-divider {
+			height: 1px;
+			margin: 4px 0 14px;
+			background: linear-gradient(90deg, rgba(0, 109, 203, 0.02), rgba(0, 109, 203, 0.28), rgba(0, 109, 203, 0.02));
+			box-shadow: none;
+		}
+		.card.accent-cpu {
+			background: linear-gradient(180deg, rgba(109, 146, 214, 0.94), rgba(74, 108, 167, 0.90));
+		}
+		.card.accent-memory {
+			background: linear-gradient(180deg, rgba(104, 165, 186, 0.94), rgba(65, 113, 133, 0.90));
+		}
+		.card.accent-usage {
+			background: linear-gradient(180deg, rgba(132, 123, 213, 0.94), rgba(88, 80, 157, 0.90));
+		}
+		.card[class*="accent-"] {
+			color: #f8fbff;
+			border-color: rgba(29, 37, 44, 0.16);
+			box-shadow: none;
+			filter: drop-shadow(0 0 14px rgba(16, 24, 40, 0.18)) drop-shadow(0 0 30px rgba(16, 24, 40, 0.12));
+			backdrop-filter: none;
+			-webkit-backdrop-filter: none;
+		}
+		.card[class*="accent-"]::after {
+			background: none;
+		}
+		.card[class*="accent-"] .eyebrow {
+			color: rgba(244, 248, 255, 0.92);
+		}
+		.card[class*="accent-"] .metric {
+			color: #ffffff;
+			text-shadow: 0 1px 1px rgba(16, 24, 40, 0.18);
+		}
+		.card[class*="accent-"] .subtle {
+			color: rgba(239, 245, 252, 0.90);
+		}
+		.pool-details {
+			margin-top: 14px;
+			display: grid;
+			gap: 10px;
+		}
+		.pool-details > details {
+			padding: 12px 14px;
+		}
+		.pool-details > details[open] > summary {
+			margin-bottom: 10px;
+		}
+		.pool-details > details > .table-wrap,
+		.pool-details > details > .key-value,
+		.pool-details > details > details,
+		.pool-details > details > div {
+			margin-top: 10px;
+		}
+		.pool-details .platform-detail {
+			margin-top: 6px;
+			padding: 14px 16px 16px;
+		}
+		.pool-details .platform-detail[open] > summary {
+			margin-bottom: 14px;
+		}
+		.pool-details .platform-detail > details + details {
+			margin-top: 14px;
+		}
+		.pool-details .platform-detail details {
+			background: #f8f9fb;
+		}
+		.pool-details .platform-detail details[open] > summary {
+			margin-bottom: 10px;
+		}
+		.pool-details .platform-detail details > .table-wrap,
+		.pool-details .platform-detail details > .key-value,
+		.pool-details .platform-detail details > details,
+		.pool-details .platform-detail details > div {
+			margin-top: 10px;
+		}
+		.data-card-body {
+			padding: 14px 18px 16px;
+		}
+		.key-value {
+			display: grid;
+			gap: 6px;
+		}
+		.kv-row {
+			display: grid;
+			grid-template-columns: minmax(120px, 180px) 1fr;
+			gap: 12px;
+			padding-bottom: 6px;
+			border-bottom: 1px solid var(--line);
+			font-size: 14px;
+		}
+		.kv-row:last-child { border-bottom: 0; padding-bottom: 0; }
+		.kv-row dt {
+			color: var(--muted);
+			font-weight: 600;
+			overflow-wrap: anywhere;
+		}
+		.kv-row dd {
+			margin: 0;
+			min-width: 0;
+			overflow-wrap: anywhere;
+			word-break: break-word;
+		}
+		.chips {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px;
+		}
+		pre {
+			margin: 0;
+			padding: 18px;
+			overflow: auto;
+			border-radius: 14px;
+			background: rgba(243, 246, 249, 0.98);
+			color: #33414d;
+			font-size: 12px;
+			line-height: 1.5;
+			max-height: 560px;
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+		}
+		.hidden { display: none !important; }
+		@media (max-width: 720px) {
+			.page { width: min(100vw - 18px, 1500px); margin-top: 10px; }
+			.hero, .section, .card { padding: 16px; }
+			.kv-row { grid-template-columns: 1fr; gap: 4px; }
+			.stat-row { grid-template-columns: 1fr; gap: 4px; }
+			.toolbar { align-items: stretch; }
+			.toolbar input { width: 100%; }
+			.section-grid { grid-template-columns: 1fr; }
+			.pool-grid.featured { grid-template-columns: 1fr; }
+			.pool-grid { grid-template-columns: 1fr; }
+			table { min-width: 640px; }
+			th, td { white-space: normal; overflow-wrap: break-word; }
+		}
+	</style>
+</head>
+<body>
+	<div class="page">
+		<section class="hero">
+			<h1 id="report-title"></h1>
+			<div class="hero-meta" id="hero-meta"></div>
+		</section>
+		<div class="toolbar">
+			<div class="toolbar-left">
+				<span class="chip"><strong>Offline</strong> self-contained HTML report</span>
+			</div>
+			<div class="note" id="source-note"></div>
+		</div>
+		<section class="kpi-grid" id="kpi-grid"></section>
+		<section class="section hidden" id="primary-table-section">
+			<h2 id="primary-table-title"></h2>
+			<p id="primary-table-copy"></p>
+			<div class="table-wrap" id="primary-table-wrap"></div>
+		</section>
+		<section class="section hidden" id="secondary-table-section">
+			<h2 id="secondary-table-title"></h2>
+			<p id="secondary-table-copy"></p>
+			<div class="table-wrap" id="secondary-table-wrap"></div>
+		</section>
+		<section class="section hidden" id="host-pool-section">
+			<h2>Host Pool Detail</h2>
+			<p>Operational, performance, and usage groupings for each pool in this export.</p>
+			<div class="pool-stack" id="host-pool-stack"></div>
+		</section>
+		<section class="section" id="data-sections">
+			<h2>Structured Data</h2>
+			<div class="section-grid" id="data-grid"></div>
+		</section>
+		<section class="section">
+			<h2>Raw JSON</h2>
+			<p>Full source payload for copy/paste, ad-hoc browser search, or diffing.</p>
+			<pre id="raw-json"></pre>
+		</section>
+	</div>
+	<script>
+		const REPORT_TITLE = __REPORT_TITLE__;
+		const SOURCE_JSON = __SOURCE_JSON__;
+		const GENERATED_AT = __GENERATED_AT__;
+		const PAYLOAD_B64 = __REPORT_PAYLOAD__;
+
+		function decodeUtf8Base64(input) {
+			const binary = atob(input);
+			const bytes = new Uint8Array(binary.length);
+			for (let i = 0; i < binary.length; i += 1) {
+				bytes[i] = binary.charCodeAt(i);
+			}
+			return new TextDecoder().decode(bytes);
+		}
+
+		const data = JSON.parse(decodeUtf8Base64(PAYLOAD_B64));
+		data.HostPools = normalizeCollection(data.HostPools).map(({ BackupInfo, BackupInfoStatus, ...pool }) => pool);
+
+		function isPlainObject(value) {
+			return value !== null && typeof value === 'object' && !Array.isArray(value);
+		}
+
+		function normalizeCollection(value) {
+			if (Array.isArray(value)) { return value; }
+			if (isPlainObject(value)) {
+				const values = Object.values(value);
+				if (!values.length) { return []; }
+				if (values.every((item) => isPlainObject(item))) { return values; }
+				return [value];
+			}
+			return [];
+		}
+
+		function toNumber(value) {
+			return typeof value === 'number' && Number.isFinite(value) ? value : null;
+		}
+
+		function average(values) {
+			const clean = values.filter((value) => typeof value === 'number' && Number.isFinite(value));
+			if (!clean.length) { return null; }
+			return clean.reduce((sum, value) => sum + value, 0) / clean.length;
+		}
+
+		function formatValue(value) {
+			if (value === null || value === undefined || value === '') { return 'None'; }
+			if (typeof value === 'boolean') { return value ? 'Yes' : 'No'; }
+			if (typeof value === 'number') {
+				if (Math.abs(value) >= 1000) { return value.toLocaleString(); }
+				return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.00$/, '');
+			}
+			if (Array.isArray(value)) { return value.length ? value.join(', ') : 'None'; }
+			if (isPlainObject(value)) { return Object.keys(value).length + ' field(s)'; }
+			return String(value);
+		}
+
+		function formatPercentValue(value) {
+			const numeric = toNumber(value);
+			if (numeric === null) { return 'n/a'; }
+			return formatValue(numeric) + '%';
+		}
+
+		function formatFieldValue(key, value) {
+			const compactKey = key ? String(key).replace(/[^A-Za-z0-9]/g, '').toLowerCase() : '';
+			if (compactKey === 'maxsessionlimit') {
+				const numeric = toNumber(value);
+				if (numeric !== null && numeric >= 999999) { return 'No Limit Set'; }
+			}
+			if (new Set(['avgcpupercent', 'avgmemusedpercent', 'p95cpupercent', 'p95memusedpercent']).has(compactKey)) {
+				return formatPercentValue(value);
+			}
+			return formatValue(value);
+		}
+
+		function resolveUnavailableMetricText(key, value, context) {
+			if (!(value === null || value === undefined || value === '')) { return null; }
+			if (!context || typeof context !== 'object') { return null; }
+			const compactKey = key ? String(key).replace(/[^A-Za-z0-9]/g, '').toLowerCase() : '';
+			const statusGroups = [
+				{
+					statusKey: 'SessionsStatus',
+					columns: new Set(['peakconcurrentsessions', 'dailypeakbreakdown'])
+				},
+				{
+					statusKey: 'MetricStatus',
+					columns: new Set(['dailyaverageusers', 'datapointcount', 'dailybreakdown'])
+				},
+				{
+					statusKey: context.QueryStatus !== undefined ? 'QueryStatus' : 'DiagnosticsStatus',
+					columns: new Set(['lastsuccessfulconnection', 'totalerrors', 'totalfailedconnections', 'shortpatherrors', 'shortpathupgradeevents', 'hostregistrationevents', 'hostregistrationhealthsummary', 'toperrors', 'transporttypebreakdown', 'hostregistrationbreakdown'])
+				}
+			];
+			const match = statusGroups.find((group) => group.columns.has(compactKey));
+			if (!match) { return null; }
+			const status = context[match.statusKey];
+			if (!status) { return null; }
+			if (/^NoDiagnosticSettings$/i.test(status)) { return 'Unavailable - logging disabled'; }
+			if (/^NoUserActivity$/i.test(status)) { return 'No user activity recorded in the selected period'; }
+			if (/^NoData$/i.test(status)) { return 'Unavailable - no data'; }
+			if (/^Error:/i.test(status)) { return 'Unavailable - query error'; }
+			return null;
+		}
+
+		function hasStructuredTableValue(value) {
+			if (value === null || value === undefined) { return false; }
+			if (Array.isArray(value)) {
+				return value.some((item) => item !== null && typeof item === 'object');
+			}
+			return typeof value === 'object';
+		}
+
+		function summarizeStructuredValue(column, value) {
+			if (Array.isArray(value)) {
+				if (!value.length) { return 'No details'; }
+				if (value.every((item) => item === null || ['string', 'number', 'boolean'].includes(typeof item))) {
+					return formatFieldValue(column, value);
+				}
+				return value.length + (value.length === 1 ? ' item' : ' items');
+			}
+			if (isPlainObject(value)) {
+				const parts = [];
+				if (value.Name) {
+					parts.push(String(value.Name));
+				}
+				if (Array.isArray(value.Routes)) {
+					parts.push(value.Routes.length + (value.Routes.length === 1 ? ' route' : ' routes'));
+				}
+				if (Array.isArray(value.CustomRules)) {
+					parts.push(value.CustomRules.length + (value.CustomRules.length === 1 ? ' custom rule' : ' custom rules'));
+				}
+				if (!parts.length) {
+					parts.push(Object.keys(value).length + ' field(s)');
+				}
+				return parts.join(' • ');
+			}
+			return formatFieldValue(column, value);
+		}
+
+		function createStructuredSummary(column, value) {
+			const summary = document.createElement('span');
+			summary.className = 'detail-summary';
+			summary.textContent = summarizeStructuredValue(column, value);
+			return summary;
+		}
+
+		function formatLabel(value) {
+			if (value === null || value === undefined || value === '') { return 'Unnamed'; }
+			const source = String(value);
+			const compact = source.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+			const directOverrides = {
+				fslogix: 'FSLogix',
+				entrasso: 'Entra SSO',
+				onedrive: 'OneDrive',
+				ad: 'AD',
+				avd: 'AVD',
+				authorizedusercount: 'Authorised User Count',
+				authorizeduserstatus: 'Authorised User Status',
+				authorizeduseridcount: 'Authorised User ID Count',
+				licensesummarystatus: 'Licence Summary Status',
+				licensesummaryusercount: 'Licence Summary User Count',
+				licensesummary: 'Licence Summary',
+				vnet: 'VNET',
+				vnetname: 'VNET Name',
+				vnetresourcegroup: 'VNET Resource Group',
+				vnetaddressprefixes: 'VNET Address Prefixes',
+				vnetcustomdnsservers: 'VNET Custom DNS Servers',
+				laps: 'LAPS',
+				teamsmediaoptimization: 'Teams Media Optimisations',
+				teamsmediaoptimisation: 'Teams Media Optimisations',
+				activedirectorydependencies: 'Active Directory Dependencies',
+				avdconnectivity: 'AVD Connectivity',
+				rdpshortpath: 'RDP Shortpath',
+				rdpredirection: 'RDP Redirection',
+				usershellfoldersavailable: 'User Shell Folders Available'
+			};
+			if (directOverrides[compact]) { return directOverrides[compact]; }
+			const wordOverrides = {
+				ad: 'AD',
+				api: 'API',
+				app: 'App',
+				apps: 'Apps',
+				arm: 'ARM',
+				avd: 'AVD',
+				cpu: 'CPU',
+				fs: 'FS',
+				gp: 'GP',
+				html: 'HTML',
+				id: 'ID',
+				intune: 'Intune',
+				json: 'JSON',
+				kfm: 'KFM',
+				laps: 'LAPS',
+				rdp: 'RDP',
+				sku: 'SKU',
+				sso: 'SSO',
+				upn: 'UPN',
+				url: 'URL',
+				vnet: 'VNET',
+				vm: 'VM'
+			};
+			const formatted = source
+				.replace(/[_-]+/g, ' ')
+				.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+				.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+				.split(/\s+/)
+				.filter(Boolean)
+				.map((part) => {
+					const lower = part.toLowerCase();
+					if (wordOverrides[lower]) { return wordOverrides[lower]; }
+					return /^[A-Z0-9]{2,}$/.test(part) ? part : part.charAt(0).toUpperCase() + part.slice(1);
+				})
+				.join(' ');
+			return formatted.replace(/\bOne Drive\b/g, 'OneDrive').replace(/\bV Net\b/g, 'VNET');
+		}
+
+		function summarizeItemLabel(item, index) {
+			if (isPlainObject(item)) {
+				const preferredKeys = ['DisplayName', 'Name', 'Hostname', 'UPN', 'UserPrincipalName', 'Path', 'ComponentName', 'TransportType', 'SkuName'];
+				for (const key of preferredKeys) {
+					if (item[key]) { return String(item[key]); }
+				}
+			}
+			return 'Item ' + (index + 1);
+		}
+
+		function isWideSection(key, value, kind) {
+			if (kind === 'host') {
+				if (new Set(['Machine', 'ActiveDirectoryDependencies', 'AvdConnectivity', 'GroupPolicy', 'UserProfileExperience']).has(key)) { return true; }
+				if (new Set(['JoinState', 'EntraSso', 'FSLogix', 'RdpShortpath', 'RdpRedirection', 'Antivirus', 'IntuneEnrollment', 'Laps', 'TeamsMediaOptimization', 'UniversalPrint', 'TimeSource', 'Printers']).has(key)) { return false; }
+			}
+			if (kind === 'metrics' && new Set(['__ExecutionContext', '__Licensing', 'ArmCallStats']).has(key)) { return true; }
+			if (Array.isArray(value)) { return true; }
+			if (!isPlainObject(value)) { return false; }
+			const keys = Object.keys(value);
+			if (keys.length > (kind === 'host' ? 7 : 5)) { return true; }
+			return keys.some((childKey) => {
+				const child = value[childKey];
+				return Array.isArray(child) || isPlainObject(child);
+			});
+		}
+
+		function setDetailsState(root, open) {
+			root.querySelectorAll('details').forEach((node) => {
+				node.open = open;
+			});
+		}
+
+		function createSectionActions(body) {
+			const detailNodes = Array.from(body.querySelectorAll('details'));
+			if (!detailNodes.length) { return null; }
+			const actions = document.createElement('div');
+			actions.className = 'section-actions';
+			const button = document.createElement('button');
+			button.type = 'button';
+			button.className = 'section-button';
+			const syncLabel = () => {
+				button.textContent = detailNodes.every((node) => node.open) ? 'Collapse All' : 'Expand All';
+			};
+			button.addEventListener('click', () => {
+				const shouldOpen = !detailNodes.every((node) => node.open);
+				setDetailsState(body, shouldOpen);
+				syncLabel();
+			});
+			detailNodes.forEach((node) => node.addEventListener('toggle', syncLabel));
+			syncLabel();
+			actions.appendChild(button);
+			return actions;
+		}
+
+		function orderedSectionEntries(kind, source) {
+			const order = kind === 'metrics'
+				? ['__ExecutionContext', 'HostPools', '__Licensing', 'ArmCallStats']
+				: ['__ExecutionContext', 'Machine', 'JoinState', 'EntraSso', 'FSLogix', 'UserProfileExperience', 'RdpShortpath', 'RdpRedirection', 'ActiveDirectoryDependencies', 'AvdConnectivity', 'GroupPolicy', 'Antivirus', 'IntuneEnrollment', 'Laps', 'TeamsMediaOptimization', 'UniversalPrint', 'TimeSource', 'Printers'];
+			const rank = new Map(order.map((key, index) => [key, index]));
+			const entries = Object.entries(source);
+			if (kind === 'metrics') {
+				entries.push(['__ExecutionContext', {
+					CustomerAbbreviation: data.CustomerAbbreviation,
+					CollectedAt: data.CollectedAt,
+					MetricPeriodStart: data.MetricPeriodStart,
+					MetricPeriodEnd: data.MetricPeriodEnd,
+					LookbackDays: data.LookbackDays,
+					ExcludeWeekends: data.ExcludeWeekends,
+					PeakHoursOnly: data.PeakHoursOnly,
+					UtcOffsetHours: data.UtcOffsetHours,
+					GeneratedBy: data.GeneratedBy,
+					ProjectCode: data.ProjectCode,
+					CommandOptions: data.CommandOptions ? {
+						SubscriptionId: data.CommandOptions.SubscriptionId,
+						HostPoolName: data.CommandOptions.HostPoolName,
+						RunLocalDiscovery: data.CommandOptions.RunLocalDiscovery,
+						InlineLocalScript: data.CommandOptions.InlineLocalScript,
+						NoGpresult: data.CommandOptions.NoGpresult,
+						SkipLicenceCheck: data.CommandOptions.SkipLicenceCheck,
+						RunAsUser: data.CommandOptions.RunAsUser,
+						GitHubBranch: data.CommandOptions.GitHubBranch,
+						LocalDiscoveryTimeout: data.CommandOptions.LocalDiscoveryTimeout,
+						OutputDirectory: data.CommandOptions.OutputDirectory,
+						ScanStorageAccounts: data.CommandOptions.ScanStorageAccounts
+					} : null
+				}]);
+				entries.push(['__Licensing', {
+					LicenseSummaryStatus: data.LicenseSummaryStatus,
+					LicenseSummaryUserCount: data.LicenseSummaryUserCount,
+					UnlicensedUserCount: data.UnlicensedUserCount,
+					LicenseSummary: data.LicenseSummary,
+					UnlicensedUsers: data.UnlicensedUsers
+				}]);
+			}
+			if (kind === 'host') {
+				entries.push(['__ExecutionContext', {
+					CustomerAbbreviation: data.CustomerAbbreviation,
+					CollectedAt: data.CollectedAt,
+					CollectionMode: data.CollectionMode,
+					RunningAsAccount: data.RunningAsAccount,
+					DiscoveryType: data.DiscoveryType,
+					GeneratedBy: data.GeneratedBy,
+					ProjectCode: data.ProjectCode,
+					PrimaryApplicationsOnly: data.PrimaryApplicationsOnly
+				}]);
+			}
+			return entries.sort(([leftKey], [rightKey]) => {
+				const leftRank = rank.has(leftKey) ? rank.get(leftKey) : 999;
+				const rightRank = rank.has(rightKey) ? rank.get(rightKey) : 999;
+				if (leftRank !== rightRank) { return leftRank - rightRank; }
+				return leftKey.localeCompare(rightKey);
+			});
+		}
+
+		function createBadge(text, variant) {
+			const badge = document.createElement('span');
+			badge.className = 'badge' + (variant ? ' ' + variant : '');
+			badge.textContent = text;
+			return badge;
+		}
+
+		function createCard(label, value, detail) {
+			const article = document.createElement('article');
+			article.className = 'card';
+			const eyebrow = document.createElement('p');
+			eyebrow.className = 'eyebrow';
+			eyebrow.textContent = label;
+			const metric = document.createElement('p');
+			metric.className = 'metric';
+			metric.textContent = typeof value === 'string' ? value : formatValue(value);
+			const subtle = document.createElement('p');
+			subtle.className = 'subtle';
+			subtle.textContent = detail || '';
+			article.append(eyebrow, metric, subtle);
+			return article;
+		}
+
+		function createMetricCard(label, value, detail, variant, valueKey, context) {
+			const resolvedValue = valueKey ? (resolveUnavailableMetricText(valueKey, value, context) || value) : value;
+			const card = createCard(label, resolvedValue, detail);
+			if (variant) { card.classList.add(variant); }
+			return card;
+		}
+
+		function formatStorageTierLabel(tier) {
+			if (!tier) { return null; }
+			const normalized = String(tier).trim().toLowerCase();
+			if (normalized === 'premium') { return 'Premium'; }
+			if (normalized === 'hot') { return 'Standard - Hot'; }
+			if (normalized === 'cool' || normalized === 'cold') { return 'Standard - Cold'; }
+			if (normalized === 'transactionoptimized' || normalized === 'transaction optimized') { return 'Standard - Transaction Optimized'; }
+			return String(tier);
+		}
+
+		function storageTierBadgeVariant(tier) {
+			const normalized = tier ? String(tier).trim().toLowerCase() : '';
+			if (normalized === 'premium') { return 'tier-gold'; }
+			if (normalized === 'hot') { return 'tier-red'; }
+			if (normalized === 'cool' || normalized === 'cold') { return 'tier-blue'; }
+			if (normalized === 'transactionoptimized' || normalized === 'transaction optimized') { return 'tier-slate'; }
+			return 'neutral';
+		}
+
+		function createStorageShareList(shares) {
+			const wrapper = document.createElement('div');
+			wrapper.className = 'share-list';
+			shares.forEach((share, index) => {
+				const item = document.createElement('div');
+				item.className = 'share-item';
+				const title = document.createElement('div');
+				title.className = 'share-title';
+				const name = document.createElement('strong');
+				name.textContent = share && share.Name ? share.Name : ('Share ' + (index + 1));
+				title.appendChild(name);
+				const meta = document.createElement('div');
+				meta.className = 'share-meta';
+				if (share && share.Tier) {
+					meta.appendChild(createBadge(formatStorageTierLabel(share.Tier), storageTierBadgeVariant(share.Tier)));
+				}
+				const provisioned = share && share.ProvisionedSizeGb != null ? (share.ProvisionedSizeGb + ' GB Provisioned') : 'Provisioned Size N/A';
+				meta.appendChild(createBadge(provisioned, 'neutral'));
+				let used = 'Usage N/A';
+				if (share && share.UsedSizeGb != null) {
+					used = share.UsedSizeGb + ' GB Used';
+					if (share.UsedPercent != null) {
+						used += ' (' + share.UsedPercent + '%)';
+					}
+				} else if (share && share.UsageStatsAvailable === false) {
+					used = 'Usage N/A (Premium Tier)';
+				}
+				meta.appendChild(createBadge(used, 'neutral'));
+				if (share && share.ProvisionedIops != null) {
+					meta.appendChild(createBadge(share.ProvisionedIops + ' IOPS', 'neutral'));
+				}
+				if (share && share.ProvisionedBandwidthMiBps != null) {
+					meta.appendChild(createBadge(share.ProvisionedBandwidthMiBps + ' MiB/s', 'neutral'));
+				}
+				meta.appendChild(createBadge(share && share.BackupEnabled ? 'Backup Enabled' : 'Backup Not Enabled', share && share.BackupEnabled ? '' : 'neutral'));
+				item.append(title, meta);
+				wrapper.appendChild(item);
+			});
+			return wrapper;
+		}
+
+		function createTableCellValue(column, value, rowContext) {
+			if (column === 'FileShares' && Array.isArray(value) && value.every((item) => isPlainObject(item))) {
+				const details = document.createElement('details');
+				details.className = 'inline-detail';
+				const summary = document.createElement('summary');
+				summary.textContent = value.length ? (value.length + (value.length === 1 ? ' share' : ' shares')) : 'No shares';
+				details.append(summary, createStorageShareList(value));
+				return details;
+			}
+			if (hasStructuredTableValue(value)) {
+				return createStructuredSummary(column, value);
+			}
+			if (value !== null && typeof value === 'object') {
+				const span = document.createElement('span');
+				span.textContent = formatFieldValue(column, value);
+				return span;
+			}
+			const span = document.createElement('span');
+			span.textContent = resolveUnavailableMetricText(column, value, rowContext) || formatFieldValue(column, value);
+			return span;
+		}
+
+		function createDetailStack(contents) {
+			const wrapper = document.createElement('div');
+			wrapper.className = 'detail-stack';
+			contents.forEach((content) => {
+				if (content) {
+					wrapper.appendChild(content);
+				}
+			});
+			return wrapper;
+		}
+
+		function createStructuredRowDetails(row, columns) {
+			const entries = columns
+				.map((column) => [column, row ? row[column] : null])
+				.filter(([, value]) => hasStructuredTableValue(value));
+			if (!entries.length) { return null; }
+			const details = document.createElement('details');
+			details.className = 'table-detail structured-detail';
+			const summary = document.createElement('summary');
+			const labels = entries.map(([column]) => formatLabel(column));
+			const preview = labels.slice(0, 3).join(', ');
+			summary.textContent = labels.length <= 3
+				? 'View details (' + preview + ')'
+				: 'View details (' + preview + ' +' + (labels.length - 3) + ')';
+			const grid = document.createElement('div');
+			grid.className = 'structured-detail-grid';
+			entries.forEach(([column, value]) => {
+				const section = document.createElement('details');
+				const sectionSummary = document.createElement('summary');
+				sectionSummary.textContent = formatLabel(column) + ' • ' + summarizeStructuredValue(column, value);
+				section.append(sectionSummary, renderStructuredValue(value, 1));
+				grid.appendChild(section);
+			});
+			details.append(summary, grid);
+			return details;
+		}
+
+		function createStatList(items) {
+			const wrapper = document.createElement('div');
+			wrapper.className = 'stat-list';
+			items.forEach((item) => {
+				const row = document.createElement('div');
+				row.className = 'stat-row';
+				const label = document.createElement('span');
+				label.className = 'muted';
+				label.textContent = item.label;
+				const value = document.createElement('strong');
+				value.textContent = formatValue(item.value);
+				row.append(label, value);
+				wrapper.appendChild(row);
+			});
+			return wrapper;
+		}
+
+		function createBarList(items) {
+			const wrapper = document.createElement('div');
+			wrapper.className = 'bar-list';
+			const max = Math.max(...items.map((item) => item.value), 0);
+			items.forEach((item) => {
+				const node = document.createElement('div');
+				node.className = 'bar-item';
+				const label = document.createElement('div');
+				label.className = 'bar-label';
+				const left = document.createElement('span');
+				left.textContent = item.label;
+				const right = document.createElement('strong');
+				right.textContent = formatValue(item.value);
+				label.append(left, right);
+				const track = document.createElement('div');
+				track.className = 'bar-track';
+				const fill = document.createElement('div');
+				fill.className = 'bar-fill';
+				fill.style.width = max > 0 ? ((item.value / max) * 100).toFixed(1) + '%' : '0%';
+				track.appendChild(fill);
+				node.append(label, track);
+				wrapper.appendChild(node);
+			});
+			return wrapper;
+		}
+
+		function objectArrayColumns(rows, preferredKeys) {
+			const discovered = [];
+			rows.slice(0, 20).forEach((row) => {
+				Object.keys(row || {}).forEach((key) => {
+					if (!discovered.includes(key)) { discovered.push(key); }
+				});
+			});
+			const preferred = (preferredKeys || []).filter((key) => discovered.includes(key));
+			const remainder = discovered.filter((key) => !preferred.includes(key));
+			return preferred.concat(remainder).slice(0, 10);
+		}
+
+		function createDetailTableRow(content, columnCount, searchText) {
+			const tr = document.createElement('tr');
+			tr.className = 'detail-row';
+			if (searchText) {
+				tr.dataset.search = searchText;
+			}
+			const td = document.createElement('td');
+			td.colSpan = Math.max(columnCount, 1);
+			td.appendChild(content);
+			tr.appendChild(td);
+			return tr;
+		}
+
+		function createStorageShareDetails(row) {
+			const shares = row && Array.isArray(row.FileShares) ? row.FileShares.filter((item) => isPlainObject(item)) : [];
+			const details = document.createElement('details');
+			details.className = 'table-detail';
+			const summary = document.createElement('summary');
+			summary.textContent = shares.length ? ('Share details (' + shares.length + (shares.length === 1 ? ' share' : ' shares') + ')') : 'Share details';
+			details.appendChild(summary);
+			if (shares.length) {
+				details.appendChild(createStorageShareList(shares));
+			} else {
+				const empty = document.createElement('span');
+				empty.className = 'muted';
+				empty.textContent = 'No shares recorded for this storage account.';
+				details.appendChild(empty);
+			}
+			return details;
+		}
+
+		function createStorageNetworkDetails(row) {
+			if (!row) { return null; }
+			const details = document.createElement('details');
+			details.className = 'table-detail';
+			const summary = document.createElement('summary');
+			const privateEndpointCount = toNumber(row.PrivateEndpointCount);
+			summary.textContent = privateEndpointCount && privateEndpointCount > 0
+				? 'Network Details (' + privateEndpointCount + (privateEndpointCount === 1 ? ' private endpoint' : ' private endpoints') + ')'
+				: 'Network Details';
+			details.appendChild(summary);
+
+			const sections = [];
+			sections.push(createStatList([
+				{ label: 'Public Network Access', value: row.PublicNetworkAccess },
+				{ label: 'Default Action', value: row.NetworkDefaultAction },
+				{ label: 'Bypass', value: row.NetworkBypass },
+				{ label: 'HTTPS Only', value: row.HttpsOnly },
+				{ label: 'Minimum TLS Version', value: row.MinimumTlsVersion },
+				{ label: 'Private Endpoint Count', value: row.PrivateEndpointCount }
+			]));
+
+			const privateEndpoints = row && Array.isArray(row.PrivateEndpoints) ? row.PrivateEndpoints.filter((item) => isPlainObject(item)) : [];
+			if (privateEndpoints.length) {
+				const endpointDetails = document.createElement('details');
+				const endpointSummary = document.createElement('summary');
+				endpointSummary.textContent = 'Private Endpoints • ' + privateEndpoints.length + (privateEndpoints.length === 1 ? ' item' : ' items');
+				endpointDetails.append(endpointSummary, wrapTable(createObjectTable(privateEndpoints, ['Name', 'ConnectionStatus', 'ProvisioningState', 'PrivateEndpointId'], { structuredDetailRows: false })));
+				sections.push(endpointDetails);
+			}
+
+			details.appendChild(createDetailStack(sections));
+			return details;
+		}
+
+		function createPoolAccessDetails(pool) {
+			const details = document.createElement('div');
+
+			const workspaceNames = Array.isArray(pool.WorkspaceNames) && pool.WorkspaceNames.length ? pool.WorkspaceNames.join(', ') : 'None';
+			const appGroupNames = Array.isArray(pool.AppGroupNames) && pool.AppGroupNames.length ? pool.AppGroupNames.join(', ') : 'None';
+			const sections = [createStatList([
+				{ label: 'Authorised User Count', value: pool.AuthorizedUserCount },
+				{ label: 'Status', value: pool.AuthorizedUserStatus },
+				{ label: 'Workspaces', value: workspaceNames },
+				{ label: 'App Groups', value: appGroupNames }
+			])];
+
+			const accessAssignments = Array.isArray(pool.AccessAssignments)
+				? pool.AccessAssignments.filter((item) => isPlainObject(item))
+				: [];
+			if (accessAssignments.length) {
+				const assignmentBlock = document.createElement('details');
+				const assignmentSummary = document.createElement('summary');
+				assignmentSummary.textContent = 'Users and Groups • ' + accessAssignments.length + (accessAssignments.length === 1 ? ' assignment' : ' assignments');
+				assignmentBlock.append(assignmentSummary, wrapTable(createObjectTable(accessAssignments, ['Type', 'DisplayName', 'UPN'], { structuredDetailRows: false })));
+				sections.push(assignmentBlock);
+			} else {
+				const empty = document.createElement('span');
+				empty.className = 'muted';
+				empty.textContent = 'No authorised users or groups were recorded for this pool in the export.';
+				sections.push(empty);
+			}
+
+			details.appendChild(createDetailStack(sections));
+			return details;
+		}
+
+		function createPoolUsageDetails(pool) {
+			const details = document.createElement('div');
+
+			const sections = [createStatList([
+				{ label: 'Daily Active Users', value: pool.DailyAverageUsers },
+				{ label: 'Usage Status', value: pool.MetricStatus },
+				{ label: 'Peak User Count', value: pool.PeakConcurrentSessions },
+				{ label: 'Peak Status', value: pool.SessionsStatus },
+				{ label: 'Sampled Days', value: pool.DataPointCount }
+			])];
+
+			const dailyBreakdown = Array.isArray(pool.DailyBreakdown) ? pool.DailyBreakdown.filter((item) => isPlainObject(item)) : [];
+			if (dailyBreakdown.length) {
+				const dailyBlock = document.createElement('details');
+				const dailySummary = document.createElement('summary');
+				dailySummary.textContent = 'Daily Active User Breakdown • ' + dailyBreakdown.length + (dailyBreakdown.length === 1 ? ' day' : ' days');
+				dailyBlock.append(dailySummary, wrapTable(createObjectTable(dailyBreakdown, ['Day', 'UniqueUsers'], { structuredDetailRows: false })));
+				sections.push(dailyBlock);
+			}
+
+			const peakBreakdown = Array.isArray(pool.DailyPeakBreakdown) ? pool.DailyPeakBreakdown.filter((item) => isPlainObject(item)) : [];
+			if (peakBreakdown.length) {
+				const peakBlock = document.createElement('details');
+				const peakSummary = document.createElement('summary');
+				peakSummary.textContent = 'Daily Peak User Breakdown • ' + peakBreakdown.length + (peakBreakdown.length === 1 ? ' day' : ' days');
+				peakBlock.append(peakSummary, wrapTable(createObjectTable(peakBreakdown, ['Day', 'PeakConcurrentSessions'], { structuredDetailRows: false })));
+				sections.push(peakBlock);
+			}
+
+			details.appendChild(createDetailStack(sections));
+			return details;
+		}
+
+		function createObjectTable(rows, preferredKeys, options) {
+			if (!rows.length) {
+				const empty = document.createElement('p');
+				empty.className = 'muted';
+				empty.textContent = 'No rows available.';
+				return empty;
+			}
+			const tableOptions = options || {};
+			const table = document.createElement('table');
+			const columns = objectArrayColumns(rows, preferredKeys).filter((column) => !(tableOptions.hiddenColumns || []).includes(column));
+			const thead = document.createElement('thead');
+			const headRow = document.createElement('tr');
+			columns.forEach((column) => {
+				const th = document.createElement('th');
+				th.textContent = formatLabel(column);
+				headRow.appendChild(th);
+			});
+			thead.appendChild(headRow);
+			const tbody = document.createElement('tbody');
+			rows.slice(0, 250).forEach((row) => {
+				const searchText = JSON.stringify(row).toLowerCase();
+				const tr = document.createElement('tr');
+				tr.dataset.search = searchText;
+				columns.forEach((column) => {
+					const td = document.createElement('td');
+					td.appendChild(createTableCellValue(column, row ? row[column] : null, row));
+					tr.appendChild(td);
+				});
+				tbody.appendChild(tr);
+				const detailContents = [];
+				if (tableOptions.detailRowFactory) {
+					detailContents.push(tableOptions.detailRowFactory(row));
+				}
+				if (tableOptions.structuredDetailRows !== false) {
+					detailContents.push(createStructuredRowDetails(row, columns));
+				}
+				const detailContent = detailContents.filter(Boolean);
+				if (detailContent.length) {
+					tbody.appendChild(createDetailTableRow(detailContent.length === 1 ? detailContent[0] : createDetailStack(detailContent), columns.length, searchText));
+				}
+			});
+			table.append(thead, tbody);
+			return table;
+		}
+
+		function wrapTable(table) {
+			const wrap = document.createElement('div');
+			wrap.className = 'table-wrap';
+			wrap.appendChild(table);
+			return wrap;
+		}
+
+		function renderPrimitiveList(values) {
+			const wrapper = document.createElement('div');
+			wrapper.className = 'chips';
+			values.forEach((value) => wrapper.appendChild(createBadge(formatValue(value), 'neutral')));
+			return wrapper;
+		}
+
+		function renderStructuredValue(value, depth, parentContext) {
+			const level = depth || 0;
+			if (value === null || value === undefined || value === '') {
+				const empty = document.createElement('span');
+				empty.className = 'muted';
+				empty.textContent = resolveUnavailableMetricText('', value, parentContext) || 'None';
+				return empty;
+			}
+			if (typeof value !== 'object') {
+				const span = document.createElement('span');
+				span.textContent = formatValue(value);
+				return span;
+			}
+			if (Array.isArray(value)) {
+				if (!value.length) {
+					const emptyArray = document.createElement('span');
+					emptyArray.className = 'muted';
+					emptyArray.textContent = 'Empty list';
+					return emptyArray;
+				}
+				if (value.every((item) => item === null || ['string', 'number', 'boolean'].includes(typeof item))) {
+					return renderPrimitiveList(value);
+				}
+				if (value.every((item) => isPlainObject(item))) {
+					return wrapTable(createObjectTable(value, []));
+				}
+				const container = document.createElement('div');
+				value.forEach((item, index) => {
+					const details = document.createElement('details');
+					const summary = document.createElement('summary');
+					summary.textContent = summarizeItemLabel(item, index);
+					details.append(summary, renderStructuredValue(item, level + 1, item));
+					container.appendChild(details);
+				});
+				return container;
+			}
+			const wrapper = document.createElement('div');
+			const primitiveEntries = [];
+			const complexEntries = [];
+			Object.entries(value).forEach(([key, child]) => {
+				const primitiveArray = Array.isArray(child) && child.every((item) => item === null || ['string', 'number', 'boolean'].includes(typeof item)) && child.length <= 12;
+				if (child === null || child === undefined || typeof child !== 'object' || primitiveArray) {
+					primitiveEntries.push([key, child]);
+				} else {
+					complexEntries.push([key, child]);
+				}
+			});
+			if (primitiveEntries.length) {
+				const dl = document.createElement('dl');
+				dl.className = 'key-value';
+				primitiveEntries.forEach(([key, child]) => {
+					const row = document.createElement('div');
+					row.className = 'kv-row';
+					const dt = document.createElement('dt');
+					dt.textContent = formatLabel(key);
+					const dd = document.createElement('dd');
+					if (Array.isArray(child)) {
+						dd.appendChild(renderPrimitiveList(child));
+					} else if (typeof child === 'boolean') {
+						dd.appendChild(createBadge(child ? 'Yes' : 'No', child ? '' : 'neutral'));
+					} else {
+						dd.textContent = resolveUnavailableMetricText(key, child, value) || formatFieldValue(key, child);
+					}
+					row.append(dt, dd);
+					dl.appendChild(row);
+				});
+				wrapper.appendChild(dl);
+			}
+			complexEntries.forEach(([key, child]) => {
+				const details = document.createElement('details');
+				const summary = document.createElement('summary');
+				summary.textContent = formatLabel(key);
+				details.append(summary, renderStructuredValue(child, level + 1, child));
+				wrapper.appendChild(details);
+			});
+			return wrapper;
+		}
+
+		function reportKind() {
+			if (Array.isArray(data.HostPools) || isPlainObject(data.HostPools)) { return 'metrics'; }
+			if (Array.isArray(data.Applications) || data.DiscoveryType === 'LocalAvdHost') { return 'host'; }
+			return 'generic';
+		}
+
+		function heroMetaEntries(kind) {
+			const entries = [
+				['Generated', data.CollectedAt || GENERATED_AT],
+				['Customer', data.CustomerAbbreviation || 'n/a'],
+				['Generated By', data.GeneratedBy || 'n/a'],
+				['Project Code', data.ProjectCode || 'n/a']
+			];
+			if (kind === 'metrics') { entries.push(['Window', (data.LookbackDays || 'n/a') + ' day(s)']); }
+			if (kind === 'host') { entries.push(['Host', data.Machine && data.Machine.Hostname ? data.Machine.Hostname : 'n/a']); }
+			return entries;
+		}
+
+		function metricsSummary() {
+			const hostPools = normalizeCollection(data.HostPools);
+			return [
+				{ label: 'Host Pools', value: data.HostPoolCount || hostPools.length, detail: 'AVD pools covered in this export' },
+				{ label: 'Subscriptions', value: data.SubscriptionCount, detail: 'Azure subscriptions scanned' }
+			];
+		}
+
+		function hostSummary() {
+			const fsLogix = data.FSLogix || {};
+			const sso = data.EntraSso || {};
+			const adDeps = data.ActiveDirectoryDependencies || {};
+			return [
+				{ label: 'Applications', value: data.ApplicationCount || normalizeCollection(data.Applications).length, detail: 'Installed apps included in the export' },
+				{ label: 'Join Type', value: data.JoinState && data.JoinState.JoinType ? data.JoinState.JoinType : 'n/a', detail: 'Detected device join state' },
+				{ label: 'FSLogix', value: fsLogix.Installed ? 'Installed' : 'Not installed', detail: 'Profile container platform status' },
+				{ label: 'Containers', value: fsLogix.ProfileContainerCount == null ? 'n/a' : fsLogix.ProfileContainerCount, detail: 'Detected profile containers' },
+				{ label: 'Entra SSO', value: sso.SsoCapable ? 'Capable' : 'Review', detail: 'Host-side SSO readiness summary' },
+				{ label: 'AD Dependencies', value: adDeps.HasDomainDependencies ? 'Present' : 'None', detail: 'Services, tasks, ODBC, and live port usage' },
+				{ label: 'Group Policy', value: data.GroupPolicy && data.GroupPolicy.Succeeded ? 'Captured' : 'Not captured', detail: 'gpresult HTML export status' },
+				{ label: 'Connectivity', value: data.ConnectivityChecksSkipped ? 'Skipped' : 'Executed', detail: 'AVD endpoint connectivity checks' }
+			];
+		}
+
+		function buildHostPoolSections() {
+			const pools = normalizeCollection(data.HostPools);
+			if (!pools.length) { return; }
+			document.getElementById('host-pool-section').classList.remove('hidden');
+			const stack = document.getElementById('host-pool-stack');
+			stack.innerHTML = '';
+			pools.forEach((pool, index) => {
+				const panel = document.createElement('article');
+				panel.className = 'pool-panel';
+				const title = document.createElement('h3');
+				title.textContent = pool.FriendlyName || pool.Name || ('Host Pool ' + (index + 1));
+				const subtitle = document.createElement('p');
+				subtitle.textContent = [pool.Name, pool.Location, pool.HostPoolType].filter(Boolean).join(' • ');
+				const featuredGrid = document.createElement('div');
+				featuredGrid.className = 'pool-grid featured';
+				[
+					createMetricCard('Authorised Users', pool.AuthorizedUserCount, 'Distinct authorised users resolved for this pool', 'accent-usage', 'AuthorizedUserCount', pool),
+					createMetricCard('CPU Average', formatPercentValue(pool.AvgCpuPercent), 'Mean CPU usage across sampled hosts', 'accent-cpu'),
+					createMetricCard('Memory Average', formatPercentValue(pool.AvgMemUsedPercent), 'Mean memory usage across sampled hosts', 'accent-memory'),
+					createMetricCard('Peak User Count', pool.PeakConcurrentSessions, 'Highest concurrent sessions observed', 'accent-usage', 'PeakConcurrentSessions', pool),
+					createMetricCard('Daily Active Users', pool.DailyAverageUsers, 'Average distinct users per sampled day', 'accent-usage', 'DailyAverageUsers', pool)
+				].forEach((card) => featuredGrid.appendChild(card));
+				const divider = document.createElement('div');
+				divider.className = 'pool-divider';
+				const grid = document.createElement('div');
+				grid.className = 'pool-grid';
+				[
+					createMetricCard('Host Count', pool.HostCount, 'Registered hosts in this pool'),
+					createMetricCard('Hosts Running', pool.HostsRunning, 'Session hosts currently powered on'),
+					createMetricCard('Hosts Available', pool.HostsAvailable, 'Hosts available for new sessions'),
+					createMetricCard('Hosts Shutdown', pool.HostsShutdown, 'Hosts currently powered off'),
+					createMetricCard('Hosts Unavailable', pool.HostsUnavailable, 'Hosts unavailable for broker placement'),
+					createMetricCard('Hosts Draining', pool.HostsDraining, 'Hosts set to stop taking new sessions')
+				].forEach((card) => grid.appendChild(card));
+				const details = document.createElement('div');
+				details.className = 'pool-details';
+				[
+					['Authorised Access', createPoolAccessDetails(pool)],
+					['User Activity', createPoolUsageDetails(pool)],
+					['Pool Configuration', {
+						HostPoolType: pool.HostPoolType,
+						LoadBalancerType: pool.LoadBalancerType,
+						MaxSessionLimit: pool.MaxSessionLimit,
+						StartVMOnConnect: pool.StartVMOnConnect,
+						DomainJoinType: pool.DomainJoinType,
+						VmSkus: pool.VmSkus,
+						AgentVersions: pool.AgentVersions
+					}],
+					['Session Hosts', pool.SessionHostDetails || []],
+					['Platform Detail', {
+						NetworkInfo: pool.NetworkInfo,
+						RdpProperties: pool.RdpProperties,
+						SsoConfig: pool.SsoConfig,
+						AppGroupDetails: pool.AppGroupDetails,
+						ImageReferences: pool.ImageReferences
+					}]
+				].forEach(([label, value]) => {
+					const block = document.createElement('details');
+					if (label === 'Platform Detail') { block.classList.add('platform-detail'); }
+					const summary = document.createElement('summary');
+					summary.textContent = label;
+					block.appendChild(summary);
+					if (value && typeof value === 'object' && typeof value.nodeType === 'number') {
+						block.appendChild(value);
+					} else {
+						block.appendChild(renderStructuredValue(value, 0));
+					}
+					details.appendChild(block);
+				});
+				panel.append(title, subtitle, featuredGrid, divider, grid, details);
+				stack.appendChild(panel);
+			});
+		}
+
+		function buildTable(sectionIdPrefix, title, copy, rows, preferredKeys, options) {
+			if (!rows.length) { return; }
+			document.getElementById(sectionIdPrefix + '-section').classList.remove('hidden');
+			document.getElementById(sectionIdPrefix + '-title').textContent = title;
+			document.getElementById(sectionIdPrefix + '-copy').textContent = copy;
+			const wrap = document.getElementById(sectionIdPrefix + '-wrap');
+			wrap.innerHTML = '';
+			wrap.appendChild(createObjectTable(rows, preferredKeys, options));
+		}
+
+		function buildStructuredSections(kind) {
+			const dataGrid = document.getElementById('data-grid');
+			const skip = kind === 'metrics'
+				? new Set(['CustomerAbbreviation', 'GeneratedBy', 'ProjectCode', 'CollectedAt', 'MetricPeriodStart', 'MetricPeriodEnd', 'LookbackDays', 'ExcludeWeekends', 'PeakHoursOnly', 'UtcOffsetHours', 'HostPools', 'StorageAccountScan', 'CommandOptions', 'LicenseSummaryStatus', 'LicenseSummary', 'LicenseSummaryUserCount', 'UnlicensedUserCount', 'UnlicensedUsers'])
+				: new Set(['Applications', 'CustomerAbbreviation', 'GeneratedBy', 'ProjectCode', 'CollectedAt', 'CollectionMode', 'RunningAsAccount', 'DiscoveryType', 'PrimaryApplicationsOnly', 'ApplicationCount']);
+			orderedSectionEntries(kind, data).forEach(([key, value]) => {
+				if (skip.has(key)) { return; }
+				const panel = document.createElement('article');
+				panel.className = 'data-card ' + (kind === 'host' ? 'compact' : (isWideSection(key, value, kind) ? 'wide' : 'compact'));
+				panel.dataset.search = (key + ' ' + JSON.stringify(value)).toLowerCase();
+				const head = document.createElement('div');
+				head.className = 'data-card-head';
+				const heading = document.createElement('h3');
+				heading.textContent = key === '__ExecutionContext' ? 'Execution Context' : key === '__Licensing' ? 'Licensing' : formatLabel(key);
+				head.appendChild(heading);
+				const body = document.createElement('div');
+				body.className = 'data-card-body';
+				body.appendChild(renderStructuredValue(value, 0));
+				const actions = createSectionActions(body);
+				if (actions) { head.appendChild(actions); }
+				panel.append(head, body);
+				dataGrid.appendChild(panel);
+			});
+		}
+
+		function init() {
+			const kind = reportKind();
+			document.getElementById('report-title').textContent = REPORT_TITLE;
+			const heroMeta = document.getElementById('hero-meta');
+			heroMetaEntries(kind).forEach(([label, value]) => {
+				const chip = document.createElement('div');
+				chip.className = 'chip';
+				chip.innerHTML = '<strong>' + label + ':</strong> <span>' + String(formatValue(value)).replace(/</g, '&lt;') + '</span>';
+				heroMeta.appendChild(chip);
+			});
+			document.getElementById('source-note').textContent = SOURCE_JSON ? 'Source JSON: ' + SOURCE_JSON : 'Generated: ' + GENERATED_AT;
+			document.getElementById('raw-json').textContent = JSON.stringify(data, null, 2);
+			const kpis = kind === 'metrics' ? metricsSummary() : kind === 'host' ? hostSummary() : Object.keys(data).slice(0, 8).map((key) => ({ label: key, value: data[key], detail: 'Top-level field' }));
+			const kpiGrid = document.getElementById('kpi-grid');
+			kpis.forEach((item) => kpiGrid.appendChild(createCard(item.label, item.value, item.detail)));
+			if (kind === 'metrics') {
+				buildTable('primary-table', 'Host Pools', 'Per-pool operational, usage, and access summary.', normalizeCollection(data.HostPools), ['Name', 'SubscriptionName', 'Location', 'HostPoolType', 'HostCount', 'AuthorizedUserCount', 'DailyAverageUsers', 'PeakConcurrentSessions', 'AvgCpuPercent', 'AvgMemUsedPercent']);
+				buildTable('secondary-table', 'Storage Accounts', 'FSLogix storage scan results included in the export, with share and network details available per storage account.', normalizeCollection(data.StorageAccountScan), ['Name', 'ResourceGroup', 'Location', 'Kind', 'Sku', 'PublicNetworkAccess', 'NetworkDefaultAction', 'PrivateEndpointCount', 'FileShareCount'], { detailRowFactory: (row) => createDetailStack([createStorageShareDetails(row), createStorageNetworkDetails(row)]) });
+				buildHostPoolSections();
+			} else if (kind === 'host') {
+				buildTable('primary-table', 'Applications', 'Installed application inventory from the host export.', normalizeCollection(data.Applications), ['DisplayName', 'DisplayVersion', 'Publisher', 'InstallDate', 'InstallLocation']);
+			}
+			buildStructuredSections(kind);
+		}
+
+		init();
+	</script>
+</body>
+</html>
+'@
+
+	$htmlContent = $htmlTemplate.Replace('__REPORT_TITLE__', $titleJson)
+	$htmlContent = $htmlContent.Replace('__REPORT_TITLE_HTML__', $titleHtml)
+	$htmlContent = $htmlContent.Replace('__SOURCE_JSON__', $sourceJson)
+	$htmlContent = $htmlContent.Replace('__GENERATED_AT__', $generatedAtJson)
+	$htmlContent = $htmlContent.Replace('__REPORT_PAYLOAD__', ($payloadB64 | ConvertTo-Json -Compress))
+
+	Set-Content -Path $OutputPath -Value $htmlContent -Encoding UTF8
+	return $OutputPath
 }
 
 # ------------------------------------------------------------------
@@ -2128,6 +3971,11 @@ function Get-HostPoolDailyAverageUsers {
 
 	Prerequisites: the host pool must have Diagnostic Settings configured to forward logs
 	to a Log Analytics workspace with the 'Connection' (WVDConnections) category enabled.
+
+	MetricStatus values:
+	  OK                 - usage figures calculated successfully
+	  NoDiagnosticSettings - no Log Analytics workspace linked to this host pool
+	  NoUserActivity     - diagnostics are enabled, but no user connections matched the window
 	#>
 	param(
 		[Parameter(Mandatory = $true)]
@@ -2204,7 +4052,7 @@ $hourFilter
 				DailyAverageUsers = $null
 				DailyBreakdown    = @()
 				DataPointCount    = 0
-				MetricStatus      = 'NoData'
+				MetricStatus      = 'NoUserActivity'
 			}
 		}
 
@@ -2227,7 +4075,7 @@ $hourFilter
 				DailyAverageUsers = $null
 				DailyBreakdown    = @()
 				DataPointCount    = 0
-				MetricStatus      = 'NoData'
+				MetricStatus      = 'NoUserActivity'
 			}
 		}
 
@@ -2612,9 +4460,9 @@ function Get-HostPoolConcurrentSessionMetrics {
 	for each day and overall. Requires WVDConnections diagnostic data in Log Analytics.
 
 	SessionsStatus values:
-	  OK                   — peak figures calculated successfully
-	  NoDiagnosticSettings — no Log Analytics workspace linked to this host pool
-	  NoData               — no WVDConnections events found in the lookback window
+	  OK                   - peak figures calculated successfully
+	  NoDiagnosticSettings - no Log Analytics workspace linked to this host pool
+	  NoUserActivity       - diagnostics are enabled, but no session events matched the window
 	#>
 	param(
 		[Parameter(Mandatory = $true)]
@@ -2692,7 +4540,7 @@ $hourFilter
 			return [PSCustomObject]@{
 				PeakConcurrentSessions = $null
 				DailyPeakBreakdown     = @()
-				SessionsStatus         = 'NoData'
+				SessionsStatus         = 'NoUserActivity'
 			}
 		}
 
@@ -2714,7 +4562,7 @@ $hourFilter
 			return [PSCustomObject]@{
 				PeakConcurrentSessions = $null
 				DailyPeakBreakdown     = @()
-				SessionsStatus         = 'NoData'
+				SessionsStatus         = 'NoUserActivity'
 			}
 		}
 
@@ -3177,6 +5025,48 @@ function Get-GroupTransitiveMemberUserIds {
 	return $userIds
 }
 
+function Get-ArmPagedItems {
+	<#
+	.SYNOPSIS
+	Fetches all items from an ARM list endpoint, following nextLink pages when present.
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Path
+	)
+
+	$items    = [System.Collections.Generic.List[object]]::new()
+	$nextPath = $Path
+
+	do {
+		$response = Invoke-ArmRequest -Path $nextPath -Method GET -ErrorAction Stop
+		$content  = if ($response.Content) { $response.Content | ConvertFrom-Json } else { $null }
+
+		if ($content -and $content.PSObject.Properties['value'] -and $content.value) {
+			foreach ($item in @($content.value)) { $items.Add($item) | Out-Null }
+		}
+
+		$nextLink = $null
+		if ($content) {
+			if ($content.PSObject.Properties['nextLink'] -and $content.nextLink) {
+				$nextLink = [string]$content.nextLink
+			}
+			elseif ($content.PSObject.Properties['@odata.nextLink'] -and $content.'@odata.nextLink') {
+				$nextLink = [string]$content.'@odata.nextLink'
+			}
+		}
+
+		if (-not [string]::IsNullOrWhiteSpace($nextLink)) {
+			$nextPath = $nextLink -replace '^https://management\.azure\.com', ''
+		}
+		else {
+			$nextPath = $null
+		}
+	} while (-not [string]::IsNullOrWhiteSpace($nextPath))
+
+	return @($items)
+}
+
 function Get-HostPoolAuthorizedUsers {
 	<#
 	.SYNOPSIS
@@ -3293,18 +5183,17 @@ function Get-HostPoolAuthorizedUsers {
 	foreach ($ag in $appGroups) {
 		try {
 			$raPath = "$($ag.id)/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
-			$raResp = Invoke-ArmRequest -Path $raPath -Method GET -ErrorAction Stop
-			if ($raResp.StatusCode -eq 200) {
-				$assignments = ($raResp.Content | ConvertFrom-Json).value |
-					Where-Object { $_.properties.roleDefinitionId -match $dvUserRoleGuid }
-				foreach ($ra in $assignments) {
-					switch ($ra.properties.principalType) {
-						'User'  { $directUserIds.Add($ra.properties.principalId)  | Out-Null }
-						'Group' { $directGroupIds.Add($ra.properties.principalId) | Out-Null }
-					}
+			$assignments = Get-ArmPagedItems -Path $raPath | Where-Object {
+				$roleDefinitionId = [string]$_.properties.roleDefinitionId
+				-not [string]::IsNullOrWhiteSpace($roleDefinitionId) -and $roleDefinitionId.ToLowerInvariant().Contains($dvUserRoleGuid)
+			}
+			foreach ($ra in $assignments) {
+				$principalType = [string]$ra.properties.principalType
+				switch -Regex ($principalType) {
+					'(?i)user$'  { $directUserIds.Add($ra.properties.principalId)  | Out-Null; break }
+					'(?i)group$' { $directGroupIds.Add($ra.properties.principalId) | Out-Null; break }
 				}
 			}
-			else { $hadErrors = $true }
 		}
 		catch { $hadErrors = $true }
 	}
@@ -4343,6 +6232,15 @@ function Invoke-HostPoolLocalDiscovery {
 	$timestamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
 	$outputFile = Join-Path $VmDiscoveryDirectory "$CustomerCode-$($vmName.ToLowerInvariant())-avd-discovery-$timestamp.json"
 	[System.IO.File]::WriteAllText($outputFile, $jsonContent, [System.Text.Encoding]::UTF8)
+	try {
+		$parsedLocalDiscovery = $jsonContent | ConvertFrom-Json -Depth 12
+		$localHtmlPath = [System.IO.Path]::ChangeExtension($outputFile, '.html')
+		Write-AvdHtmlReport -Data $parsedLocalDiscovery -OutputPath $localHtmlPath -Title "AVD Host Audit Report - $vmName" -SourceJsonFileName (Split-Path $outputFile -Leaf) | Out-Null
+		Write-Host "    [LocalDiscovery | $vmName] Saved HTML: $localHtmlPath"
+	}
+	catch {
+		Write-Warning "[LocalDiscovery | $vmName] Failed to generate HTML report: $($_.Exception.Message)"
+	}
 	Write-Host "    [LocalDiscovery | $vmName] Saved: $outputFile"
 
 	# Retrieve and save the gpresult HTML report if the VM staged one.
@@ -4419,6 +6317,8 @@ try {
 	}
 
 	$customerCode  = Get-CustomerAbbreviation -Value $CustomerAbbreviation
+	$GeneratedBy   = Get-RequiredTextValue -Prompt 'Enter engineer name' -Value $GeneratedBy
+	$ProjectCode   = Get-RequiredTextValue -Prompt 'Enter project code' -Value $ProjectCode
 	$endTime       = (Get-Date).ToUniversalTime().Date          # midnight UTC today
 	$startTime     = $endTime.AddDays(-$LookbackDays)
 
@@ -4446,6 +6346,8 @@ try {
 		'AVD Discovery  —  Metrics Collection',
 		'',
 		"Customer     :  $customerCode",
+		"Engineer     :  $GeneratedBy",
+		"Project Code :  $ProjectCode",
 		"Period       :  $($startTime.ToString('yyyy-MM-dd'))  →  $($endTime.ToString('yyyy-MM-dd'))  ($LookbackDays days)",
 		"Weekends     :  $(if ($ExcludeWeekends.IsPresent) { 'Excluded' } else { 'Included' })",
 		"Peak Hours   :  $_peakDesc",
@@ -4626,12 +6528,12 @@ try {
 
 		Write-CheckStart 'Usage Metrics'
 		$metrics = Get-HostPoolDailyAverageUsers -HostPool $pool -StartTime $startTime -EndTime $endTime -ExcludeWeekends:$ExcludeWeekends -PeakHoursOnly:$PeakHoursOnly -UtcOffsetHours $UtcOffsetHours
-		$_usageResult = if ($metrics.MetricStatus -match 'Error') { 'Failed' } elseif ($metrics.MetricStatus -match 'NoDiagnosticSettings|NoData') { 'Skipped' } else { 'Success' }
+		$_usageResult = if ($metrics.MetricStatus -match 'Error') { 'Failed' } elseif ($metrics.MetricStatus -match 'NoDiagnosticSettings|NoUserActivity|NoData') { 'Skipped' } else { 'Success' }
 		Write-CheckResult $_usageResult "Avg Users/Day: $(if ($null -ne $metrics.DailyAverageUsers) { [Math]::Round($metrics.DailyAverageUsers, 1) } else { 'N/A' })  |  Status: $($metrics.MetricStatus)"
 
 		Write-CheckStart 'Concurrent Sessions'
 		$sessionMetrics = Get-HostPoolConcurrentSessionMetrics -HostPool $pool -StartTime $startTime -EndTime $endTime -ExcludeWeekends:$ExcludeWeekends -PeakHoursOnly:$PeakHoursOnly -UtcOffsetHours $UtcOffsetHours
-		$_sessResult = if ($sessionMetrics.SessionsStatus -match 'Error') { 'Failed' } elseif ($sessionMetrics.SessionsStatus -match 'NoDiagnosticSettings|NoData') { 'Skipped' } else { 'Success' }
+		$_sessResult = if ($sessionMetrics.SessionsStatus -match 'Error') { 'Failed' } elseif ($sessionMetrics.SessionsStatus -match 'NoDiagnosticSettings|NoUserActivity|NoData') { 'Skipped' } else { 'Success' }
 		Write-CheckResult $_sessResult "Peak: $(if ($null -ne $sessionMetrics.PeakConcurrentSessions) { $sessionMetrics.PeakConcurrentSessions } else { 'N/A' })  |  Status: $($sessionMetrics.SessionsStatus)"
 
 		Write-CheckStart 'Hosts On / Off'
@@ -4720,8 +6622,6 @@ try {
 			NetworkInfo          = $infra.NetworkInfo
 			ReservationMatchStatus = $reservations.ReservationMatchStatus
 			MatchedReservations    = $reservations.MatchedReservations
-			BackupInfoStatus       = $backupInfo.BackupInfoStatus
-			BackupInfo             = $backupInfo.BackupInfo
 			ScalingPlan          = $infra.ScalingPlan
 			RdpProperties        = $rdpProperties
 			SsoConfig            = $ssoConfig
@@ -4732,7 +6632,33 @@ try {
 			AccessAssignments    = $authUsers.AccessAssignments
 			AuthorizedUserCount  = $authUsers.AuthorizedUserCount
 			AuthorizedUserStatus = $authUsers.AuthorizedUserStatus
-			SessionHostDetails       = $infra.SessionHostDetails
+			SessionHostDetails       = if ($pool.HostPoolType -eq 'Personal' -and @($backupInfo.BackupInfo).Count -gt 0) {
+				$backupLookup = @{}
+				foreach ($backupEntry in @($backupInfo.BackupInfo)) {
+					if (-not $backupEntry -or [string]::IsNullOrWhiteSpace([string]$backupEntry.VmName)) { continue }
+					$backupLookup[(([string]$backupEntry.VmName -split '\.')[0]).ToLowerInvariant()] = $backupEntry
+				}
+				@($infra.SessionHostDetails | ForEach-Object {
+					$backupEntry = $backupLookup[(([string]$_.Name -split '\.')[0]).ToLowerInvariant()]
+					$_ | Select-Object -Property @(
+						@{ Name = 'Name';                    Expression = { $_.Name } }
+						@{ Name = 'Backup';                  Expression = { if ($backupEntry) { if ($backupEntry.IsBackedUp) { 'Backed Up' } else { 'Not Backed Up' } } else { $null } } }
+						@{ Name = 'IpAddress';               Expression = { $_.IpAddress } }
+						@{ Name = 'PublicIpAddress';         Expression = { $_.PublicIpAddress } }
+						@{ Name = 'OutboundPublicIpAddress'; Expression = { $_.OutboundPublicIpAddress } }
+						@{ Name = 'Status';                  Expression = { $_.Status } }
+						@{ Name = 'Sessions';                Expression = { $_.Sessions } }
+						@{ Name = 'AgentVersion';            Expression = { $_.AgentVersion } }
+						@{ Name = 'LastHeartBeat';           Expression = { $_.LastHeartBeat } }
+						@{ Name = 'AllowNewSession';         Expression = { $_.AllowNewSession } }
+						@{ Name = 'AssignedUser';            Expression = { $_.AssignedUser } }
+						@{ Name = 'UpdateState';             Expression = { $_.UpdateState } }
+						@{ Name = 'OsVersion';               Expression = { $_.OsVersion } }
+					)
+				})
+			} else {
+				$infra.SessionHostDetails
+			}
 			AvgCpuPercent            = $cpuMetrics.AvgCpuPercent
 			P95CpuPercent            = $cpuMetrics.P95CpuPercent
 			P99CpuPercent            = $cpuMetrics.P99CpuPercent
@@ -4956,6 +6882,8 @@ try {
 	}
 
 	$exportObject | ConvertTo-Json -Depth 8 | Set-Content -Path $resolvedOutputPath -Encoding UTF8
+	$resolvedHtmlPath = [System.IO.Path]::ChangeExtension($resolvedOutputPath, '.html')
+	Write-AvdHtmlReport -Data $exportObject -OutputPath $resolvedHtmlPath -Title "AVD Metrics Report - $customerCode" -SourceJsonFileName (Split-Path $resolvedOutputPath -Leaf) | Out-Null
 
 	Clear-SpinnerLine
 	$_elapsed = $scriptStopwatch.Elapsed
@@ -4971,6 +6899,7 @@ try {
 	$_armColor = if ($_readPct -gt 80 -or $_writePct -gt 80) { 'Yellow' } else { 'DarkGray' }
 	Write-Host "  ARM calls   :  $($script:armCounts.Read) reads ($_readPct% of 12,000/hr)  |  $($script:armCounts.Write) writes ($_writePct% of 1,200/hr)" -ForegroundColor $_armColor
 	Write-Host "  Output file :  $resolvedOutputPath" -ForegroundColor Cyan
+	Write-Host "  HTML report :  $resolvedHtmlPath" -ForegroundColor Cyan
 	Write-Host ''
 }
 catch {
