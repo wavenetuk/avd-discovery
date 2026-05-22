@@ -534,11 +534,17 @@ function Write-AvdHtmlReport {
 			letter-spacing: 0.02em;
 			min-width: 0;
 			overflow-wrap: anywhere;
+			position: relative;
+			overflow: hidden;
 		}
 		.chip strong,
 		.chip span {
 			min-width: 0;
 			overflow-wrap: anywhere;
+		}
+		.chip > * {
+			position: relative;
+			z-index: 1;
 		}
 		.toolbar {
 			display: flex;
@@ -587,6 +593,26 @@ function Write-AvdHtmlReport {
 			backdrop-filter: blur(12px) saturate(108%);
 			-webkit-backdrop-filter: blur(12px) saturate(108%);
 		}
+		.interactive-surface {
+			transition: border-color 180ms ease;
+		}
+		.interactive-surface:hover {
+			border-color: rgba(0, 109, 203, 0.24);
+		}
+		.card.interactive-surface:hover {
+			border-color: rgba(84, 161, 246, 0.30);
+		}
+		.chip.interactive-surface:hover {
+			border-color: rgba(84, 161, 246, 0.34);
+		}
+		.badge.interactive-surface {
+			border: 1px solid transparent;
+			transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+		}
+		.badge.interactive-surface:hover {
+			border-color: rgba(84, 161, 246, 0.34);
+			box-shadow: 0 0 0 1px rgba(84, 161, 246, 0.18);
+		}
 		.card {
 			background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(244, 248, 252, 0.88));
 			border: 1px solid rgba(255, 255, 255, 0.68);
@@ -620,6 +646,11 @@ function Write-AvdHtmlReport {
 				radial-gradient(circle at top left, rgba(255, 255, 255, 0.28), transparent 34%),
 				radial-gradient(circle at top right, rgba(0, 109, 203, 0.05), transparent 28%);
 			pointer-events: none;
+			opacity: 0.86;
+			transition: opacity 180ms ease;
+		}
+		.card.interactive-surface:hover::after {
+			opacity: 1;
 		}
 		.card > * {
 			position: relative;
@@ -748,6 +779,19 @@ function Write-AvdHtmlReport {
 		}
 		tbody tr:hover {
 			background: rgba(0, 109, 203, 0.06);
+		}
+		.host-pool-jump {
+			color: var(--ink);
+			font-weight: 600;
+			text-decoration: none;
+			border-bottom: 1px solid rgba(22, 55, 92, 0.18);
+			transition: color 140ms ease, border-color 140ms ease;
+		}
+		.host-pool-jump:hover,
+		.host-pool-jump:focus-visible {
+			color: var(--accent);
+			border-bottom-color: rgba(22, 55, 92, 0.44);
+			outline: none;
 		}
 		tr.detail-row:hover {
 			background: transparent;
@@ -977,7 +1021,7 @@ function Write-AvdHtmlReport {
 			backdrop-filter: blur(12px) saturate(108%);
 			-webkit-backdrop-filter: blur(12px) saturate(108%);
 			position: relative;
-			overflow: hidden;
+			overflow: visible;
 		}
 		.pool-panel::after {
 			content: "";
@@ -989,14 +1033,142 @@ function Write-AvdHtmlReport {
 			pointer-events: none;
 		}
 		.pool-panel h3 {
-			margin: 0 0 6px;
+			margin: 0;
 			font-size: 22px;
 			letter-spacing: -0.03em;
 			color: #000000;
 		}
+		.pool-header {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 14px;
+			margin: 0 0 6px;
+		}
+		.pool-title-wrap {
+			display: inline-flex;
+			align-items: center;
+			gap: 10px;
+			min-width: 0;
+		}
+		.pool-warning {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			position: relative;
+			flex: 0 0 auto;
+			width: 18px;
+			height: 18px;
+			z-index: 8;
+			cursor: help;
+		}
+		.pool-warning-icon {
+			position: relative;
+			z-index: 1;
+			width: 100%;
+			height: 100%;
+			background-repeat: no-repeat;
+			background-position: center;
+			background-size: contain;
+			background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23ffe58a'/%3E%3Cstop offset='0.56' stop-color='%23ffd23d'/%3E%3Cstop offset='1' stop-color='%23ffbf1f'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M32 7 58 55a4 4 0 0 1-3.5 6H9.5A4 4 0 0 1 6 55L32 7Z' fill='url(%23g)' stroke='%2316171c' stroke-width='4.5' stroke-linejoin='round'/%3E%3Cpath d='M32 22c2.1 0 3.3 1.3 3.2 3.4l-1.4 15.1a1.8 1.8 0 0 1-3.6 0l-1.4-15.1c-.1-2.1 1.1-3.4 3.2-3.4Z' fill='%2316171c'/%3E%3Ccircle cx='32' cy='47.5' r='3.9' fill='%2316171c'/%3E%3Cpath d='M18 28c3.5-5.8 8.8-11.6 15.2-16.4' stroke='%23fff8d6' stroke-opacity='.55' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E");
+			filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.35));
+		}
+		.pool-warning::after {
+			content: attr(data-tooltip);
+			position: absolute;
+			top: calc(100% + 8px);
+			left: -10px;
+			right: auto;
+			width: var(--warning-tooltip-width, 220px);
+			max-width: calc(100vw - 40px);
+			padding: 8px 10px;
+			border-radius: 8px;
+			border: 1px solid rgba(15, 23, 32, 0.28);
+			background: rgba(24, 32, 42, 0.96);
+			color: #ffffff;
+			font-size: 12px;
+			line-height: 1.45;
+			text-align: left;
+			text-shadow: none;
+			box-shadow: 0 18px 36px rgba(0, 0, 0, 0.34);
+			z-index: 40;
+			opacity: 0;
+			pointer-events: none;
+			transform: translateY(-4px);
+			transition: opacity 140ms ease, transform 140ms ease;
+		}
+		.pool-warning::before {
+			content: '';
+			position: absolute;
+			top: calc(100% + 1px);
+			left: 14px;
+			width: 0;
+			height: 0;
+			border-left: 6px solid transparent;
+			border-right: 6px solid transparent;
+			border-bottom: 7px solid rgba(24, 32, 42, 0.96);
+			z-index: 39;
+			opacity: 0;
+			pointer-events: none;
+			transform: translateY(-4px);
+			transition: opacity 140ms ease, transform 140ms ease;
+		}
+		.pool-warning.tooltip-flip::after {
+			left: auto;
+			right: -10px;
+		}
+		.pool-warning.tooltip-flip::before {
+			left: auto;
+			right: 14px;
+		}
+		.pool-warning:hover::after,
+		.pool-warning:focus-visible::after {
+			opacity: 1;
+			transform: translateY(0);
+		}
+		.pool-warning:hover::before,
+		.pool-warning:focus-visible::before {
+			opacity: 1;
+			transform: translateY(0);
+		}
 		.pool-panel > p {
 			margin: 0 0 14px;
 			color: var(--muted);
+		}
+		.pool-highlights {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px;
+			margin: 0;
+			justify-content: flex-end;
+		}
+		.pool-highlights .chip {
+			padding: 9px 14px;
+			background: linear-gradient(180deg, rgba(233, 244, 255, 0.98), rgba(219, 237, 252, 0.94));
+			border: 1px solid rgba(0, 109, 203, 0.16);
+			box-shadow: 0 10px 22px rgba(0, 109, 203, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+		}
+		.pool-highlights .chip strong {
+			color: #0b4f8a;
+		}
+		.pool-highlights .chip span {
+			color: #0f1720;
+		}
+		.pool-highlights .chip[data-chip-label="subscription"] {
+			background: linear-gradient(180deg, rgba(233, 249, 240, 0.98), rgba(214, 241, 226, 0.94));
+			border-color: rgba(28, 132, 86, 0.18);
+			box-shadow: 0 10px 22px rgba(28, 132, 86, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+		}
+		.pool-highlights .chip[data-chip-label="subscription"] strong {
+			color: #116946;
+		}
+		.pool-highlights .chip[data-chip-label="resource-group"] {
+			background: linear-gradient(180deg, rgba(255, 244, 227, 0.98), rgba(251, 233, 202, 0.94));
+			border-color: rgba(181, 118, 28, 0.20);
+			box-shadow: 0 10px 22px rgba(181, 118, 28, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+		}
+		.pool-highlights .chip[data-chip-label="resource-group"] strong {
+			color: #9a5d10;
 		}
 		.pool-grid {
 			display: grid;
@@ -1031,7 +1203,15 @@ function Write-AvdHtmlReport {
 			-webkit-backdrop-filter: none;
 		}
 		.card[class*="accent-"]::after {
-			background: none;
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05) 38%, transparent 74%);
+			opacity: 0.24;
+			transition: opacity 220ms ease;
+		}
+		.card[class*="accent-"].interactive-surface:hover {
+			border-color: rgba(210, 228, 255, 0.42);
+		}
+		.card[class*="accent-"].interactive-surface:hover::after {
+			opacity: 0.44;
 		}
 		.card[class*="accent-"] .eyebrow {
 			color: rgba(244, 248, 255, 0.92);
@@ -1047,6 +1227,37 @@ function Write-AvdHtmlReport {
 			margin-top: 14px;
 			display: grid;
 			gap: 10px;
+		}
+		.pool-meta {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+			align-items: stretch;
+			gap: 10px;
+			margin: 0 0 14px;
+		}
+		.pool-meta .chip {
+			display: flex;
+			flex-direction: column;
+			align-items: flex-start;
+			justify-content: center;
+			gap: 4px;
+			min-height: 58px;
+			padding: 10px 12px;
+			border-radius: 16px;
+			font-size: 12px;
+			background: rgba(255, 255, 255, 0.72);
+			box-shadow: 0 8px 18px rgba(29, 37, 44, 0.04), inset 0 0 14px rgba(29, 37, 44, 0.02), inset 0 1px 0 rgba(255, 255, 255, 0.66);
+		}
+		.pool-meta .chip span {
+			display: block;
+			width: 100%;
+			line-height: 1.35;
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+		.pool-meta .chip strong {
+			color: #101828;
 		}
 		.pool-details > details {
 			padding: 12px 14px;
@@ -1136,6 +1347,9 @@ function Write-AvdHtmlReport {
 			.toolbar { align-items: stretch; }
 			.toolbar input { width: 100%; }
 			.section-grid { grid-template-columns: 1fr; }
+			.pool-header { flex-direction: column; align-items: flex-start; }
+			.pool-title-wrap { width: 100%; }
+			.pool-highlights { justify-content: flex-start; width: 100%; }
 			.pool-grid.featured { grid-template-columns: 1fr; }
 			.pool-grid { grid-template-columns: 1fr; }
 			table { min-width: 640px; }
@@ -1276,8 +1490,8 @@ function Write-AvdHtmlReport {
 			if (!match) { return null; }
 			const status = context[match.statusKey];
 			if (!status) { return null; }
-			if (/^NoDiagnosticSettings$/i.test(status)) { return 'Unavailable - logging disabled'; }
-			if (/^NoUserActivity$/i.test(status)) { return 'No user activity recorded in the selected period'; }
+			if (/^NoDiagnosticSettings$/i.test(status)) { return 'Logging disabled'; }
+			if (/^NoUserActivity$/i.test(status)) { return 'No activity in period'; }
 			if (/^NoData$/i.test(status)) { return 'Unavailable - no data'; }
 			if (/^Error:/i.test(status)) { return 'Unavailable - query error'; }
 			return null;
@@ -1449,6 +1663,19 @@ function Write-AvdHtmlReport {
 			return actions;
 		}
 
+		function positionWarningTooltip(node) {
+			if (!node) { return; }
+			const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+			const tooltipWidth = Math.min(220, Math.max(170, viewportWidth - 40));
+			node.style.setProperty('--warning-tooltip-width', tooltipWidth + 'px');
+			node.classList.remove('tooltip-flip');
+			const rect = node.getBoundingClientRect();
+			const overflowsRight = rect.left - 10 + tooltipWidth > viewportWidth - 16;
+			if (overflowsRight) {
+				node.classList.add('tooltip-flip');
+			}
+		}
+
 		function orderedSectionEntries(kind, source) {
 			const order = kind === 'metrics'
 				? ['__ExecutionContext', 'HostPools', '__Licensing', 'ArmCallStats']
@@ -1539,6 +1766,14 @@ function Write-AvdHtmlReport {
 			return card;
 		}
 
+		function wireInteractiveSurfaces() {
+			document.querySelectorAll('.card, .chip, .badge, .data-card, .section, details, .table-wrap, .toolbar input, .section-button').forEach((node) => {
+				if (node.dataset.interactiveBound === '1') { return; }
+				node.dataset.interactiveBound = '1';
+				node.classList.add('interactive-surface');
+			});
+		}
+
 		function formatStorageTierLabel(tier) {
 			if (!tier) { return null; }
 			const normalized = String(tier).trim().toLowerCase();
@@ -1547,6 +1782,20 @@ function Write-AvdHtmlReport {
 			if (normalized === 'cool' || normalized === 'cold') { return 'Standard - Cold'; }
 			if (normalized === 'transactionoptimized' || normalized === 'transaction optimized') { return 'Standard - Transaction Optimized'; }
 			return String(tier);
+		}
+
+		function slugifyFragment(value) {
+			return String(value || '')
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, '-')
+				.replace(/^-+|-+$/g, '');
+		}
+
+		function hostPoolAnchorId(pool, fallbackIndex) {
+			const namePart = slugifyFragment(pool && (pool.Name || pool.FriendlyName));
+			const subscriptionPart = slugifyFragment(pool && (pool.SubscriptionName || pool.SubscriptionId));
+			const suffix = namePart || ('pool-' + ((fallbackIndex || 0) + 1));
+			return 'host-pool-' + (subscriptionPart ? (subscriptionPart + '-') : '') + suffix;
 		}
 
 		function storageTierBadgeVariant(tier) {
@@ -1600,6 +1849,13 @@ function Write-AvdHtmlReport {
 		}
 
 		function createTableCellValue(column, value, rowContext) {
+			if (column === 'Name' && rowContext && (rowContext.HostPoolType || rowContext.SessionHostDetails || rowContext.AuthorizedUserCount != null)) {
+				const link = document.createElement('a');
+				link.className = 'host-pool-jump';
+				link.href = '#' + hostPoolAnchorId(rowContext);
+				link.textContent = resolveUnavailableMetricText(column, value, rowContext) || formatFieldValue(column, value);
+				return link;
+			}
 			if (column === 'FileShares' && Array.isArray(value) && value.every((item) => isPlainObject(item))) {
 				const details = document.createElement('details');
 				details.className = 'inline-detail';
@@ -1671,6 +1927,22 @@ function Write-AvdHtmlReport {
 				value.textContent = formatValue(item.value);
 				row.append(label, value);
 				wrapper.appendChild(row);
+			});
+			return wrapper;
+		}
+
+		function createChipList(items, className) {
+			const wrapper = document.createElement('div');
+			wrapper.className = className || 'chips';
+			items.forEach((item) => {
+				const fullValue = String(formatValue(item.value));
+				const displayValue = fullValue.length > 34 ? fullValue.slice(0, 31).trimEnd() + '...' : fullValue;
+				const chip = document.createElement('div');
+				chip.className = 'chip';
+				chip.dataset.chipLabel = String(item.label || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+				if (displayValue !== fullValue) { chip.title = fullValue; }
+				chip.innerHTML = '<strong>' + String(item.label).replace(/</g, '&lt;') + ':</strong> <span>' + displayValue.replace(/</g, '&lt;') + '</span>';
+				wrapper.appendChild(chip);
 			});
 			return wrapper;
 		}
@@ -1837,6 +2109,57 @@ function Write-AvdHtmlReport {
 				peakSummary.textContent = 'Daily Peak User Breakdown • ' + peakBreakdown.length + (peakBreakdown.length === 1 ? ' day' : ' days');
 				peakBlock.append(peakSummary, wrapTable(createObjectTable(peakBreakdown, ['Day', 'PeakConcurrentSessions'], { structuredDetailRows: false })));
 				sections.push(peakBlock);
+			}
+
+			const insights = isPlainObject(pool.InsightsDiagnostics) ? pool.InsightsDiagnostics : null;
+			if (insights) {
+				const insightsSections = [createStatList([
+					{ label: 'Status', value: insights.QueryStatus },
+					{ label: 'Workspace', value: insights.LogAnalyticsWorkspace },
+					{ label: 'Diagnostic Categories', value: insights.DiagnosticCategories },
+					{ label: 'Window Start', value: insights.QueryWindowStart },
+					{ label: 'Window End', value: insights.QueryWindowEnd },
+					{ label: 'Last Successful Connection', value: insights.LastSuccessfulConnection },
+					{ label: 'Total Errors', value: insights.TotalErrors },
+					{ label: 'Failed Connections', value: insights.TotalFailedConnections },
+					{ label: 'Shortpath Errors', value: insights.ShortpathErrors },
+					{ label: 'Shortpath Upgrades', value: insights.ShortpathUpgradeEvents },
+					{ label: 'Host Registration Events', value: insights.HostRegistrationEvents },
+					{ label: 'Registration Health', value: insights.HostRegistrationHealthSummary }
+				])];
+
+				const topErrors = Array.isArray(insights.TopErrors) ? insights.TopErrors.filter((item) => isPlainObject(item)) : [];
+				if (topErrors.length) {
+					const errorsBlock = document.createElement('details');
+					const errorsSummary = document.createElement('summary');
+					errorsSummary.textContent = 'Top Errors • ' + topErrors.length + (topErrors.length === 1 ? ' item' : ' items');
+					errorsBlock.append(errorsSummary, wrapTable(createObjectTable(topErrors, ['Code', 'Message', 'Count', 'Service'], { structuredDetailRows: false })));
+					insightsSections.push(errorsBlock);
+				}
+
+				const transportBreakdown = Array.isArray(insights.TransportTypeBreakdown) ? insights.TransportTypeBreakdown.filter((item) => isPlainObject(item)) : [];
+				if (transportBreakdown.length) {
+					const transportBlock = document.createElement('details');
+					const transportSummary = document.createElement('summary');
+					transportSummary.textContent = 'Transport Breakdown • ' + transportBreakdown.length + (transportBreakdown.length === 1 ? ' item' : ' items');
+					transportBlock.append(transportSummary, wrapTable(createObjectTable(transportBreakdown, ['TransportType', 'Count'], { structuredDetailRows: false })));
+					insightsSections.push(transportBlock);
+				}
+
+				const registrationBreakdown = Array.isArray(insights.HostRegistrationBreakdown) ? insights.HostRegistrationBreakdown.filter((item) => isPlainObject(item)) : [];
+				if (registrationBreakdown.length) {
+					const registrationBlock = document.createElement('details');
+					const registrationSummary = document.createElement('summary');
+					registrationSummary.textContent = 'Host Registration Breakdown • ' + registrationBreakdown.length + (registrationBreakdown.length === 1 ? ' host' : ' hosts');
+					registrationBlock.append(registrationSummary, wrapTable(createObjectTable(registrationBreakdown, ['SessionHostName', 'RegistrationCount', 'LastRegistrationTime'], { structuredDetailRows: false })));
+					insightsSections.push(registrationBlock);
+				}
+
+				const insightsBlock = document.createElement('details');
+				const insightsSummary = document.createElement('summary');
+				insightsSummary.textContent = 'Diagnostic Insights';
+				insightsBlock.append(insightsSummary, createDetailStack(insightsSections));
+				sections.push(insightsBlock);
 			}
 
 			details.appendChild(createDetailStack(sections));
@@ -2031,19 +2354,70 @@ function Write-AvdHtmlReport {
 			pools.forEach((pool, index) => {
 				const panel = document.createElement('article');
 				panel.className = 'pool-panel';
+				panel.id = hostPoolAnchorId(pool, index);
+				panel.style.scrollMarginTop = '24px';
+				const diagnosticsStatus = pool.InsightsDiagnostics && pool.InsightsDiagnostics.QueryStatus
+					? pool.InsightsDiagnostics.QueryStatus
+					: (pool.MetricStatus || pool.SessionsStatus || '');
+				const titleWrap = document.createElement('div');
+				titleWrap.className = 'pool-title-wrap';
+				let warning = null;
+				if (/^NoDiagnosticSettings$/i.test(diagnosticsStatus)) {
+					panel.classList.add('has-warning');
+					warning = document.createElement('span');
+					warning.className = 'pool-warning';
+					warning.setAttribute('role', 'img');
+					warning.setAttribute('aria-label', 'Warning: Log Analytics diagnostic settings are not enabled for this host pool.');
+					warning.setAttribute('tabindex', '0');
+					warning.dataset.tooltip = 'Log Analytics diagnostic settings are not enabled for this host pool. Usage metrics and Insights data are unavailable until diagnostic logging is configured.';
+					const warningIcon = document.createElement('span');
+					warningIcon.className = 'pool-warning-icon';
+					warningIcon.setAttribute('aria-hidden', 'true');
+					warning.append(warningIcon);
+					const updateWarningTooltip = () => positionWarningTooltip(warning);
+					warning.addEventListener('mouseenter', updateWarningTooltip);
+					warning.addEventListener('focus', updateWarningTooltip);
+					window.addEventListener('resize', updateWarningTooltip);
+				}
+				const titleText = pool.FriendlyName || pool.Name || ('Host Pool ' + (index + 1));
+				const header = document.createElement('div');
+				header.className = 'pool-header';
 				const title = document.createElement('h3');
-				title.textContent = pool.FriendlyName || pool.Name || ('Host Pool ' + (index + 1));
+				title.textContent = titleText;
+				titleWrap.append(title);
+				if (warning) {
+					titleWrap.append(warning);
+				}
 				const subtitle = document.createElement('p');
-				subtitle.textContent = [pool.Name, pool.Location, pool.HostPoolType].filter(Boolean).join(' • ');
+				subtitle.textContent = (pool.FriendlyName && pool.Name && pool.FriendlyName !== pool.Name) ? pool.Name : '';
+				const poolHighlights = createChipList([
+					{ label: 'Location', value: pool.Location },
+					{ label: 'Subscription', value: pool.SubscriptionName },
+					{ label: 'Resource Group', value: pool.ResourceGroup }
+				], 'pool-highlights');
+				header.append(titleWrap, poolHighlights);
+				const poolMeta = createChipList([
+					{ label: 'Load Balancer', value: pool.LoadBalancerType },
+					{ label: 'Pool Type', value: pool.HostPoolType },
+					{ label: 'Max Sessions', value: formatFieldValue('MaxSessionLimit', pool.MaxSessionLimit) },
+					{ label: 'Domain Join', value: pool.DomainJoinType },
+					{ label: 'VM SKUs', value: pool.VmSkus },
+					{ label: 'Agent Versions', value: pool.AgentVersions }
+				], 'pool-meta');
 				const featuredGrid = document.createElement('div');
 				featuredGrid.className = 'pool-grid featured';
-				[
-					createMetricCard('Authorised Users', pool.AuthorizedUserCount, 'Distinct authorised users resolved for this pool', 'accent-usage', 'AuthorizedUserCount', pool),
+				const featuredCards = [
 					createMetricCard('CPU Average', formatPercentValue(pool.AvgCpuPercent), 'Mean CPU usage across sampled hosts', 'accent-cpu'),
 					createMetricCard('Memory Average', formatPercentValue(pool.AvgMemUsedPercent), 'Mean memory usage across sampled hosts', 'accent-memory'),
-					createMetricCard('Peak User Count', pool.PeakConcurrentSessions, 'Highest concurrent sessions observed', 'accent-usage', 'PeakConcurrentSessions', pool),
-					createMetricCard('Daily Active Users', pool.DailyAverageUsers, 'Average distinct users per sampled day', 'accent-usage', 'DailyAverageUsers', pool)
-				].forEach((card) => featuredGrid.appendChild(card));
+					createMetricCard('Authorised Users', pool.AuthorizedUserCount, 'Distinct authorised users resolved for this pool', 'accent-usage', 'AuthorizedUserCount', pool)
+				];
+				if (!/^NoDiagnosticSettings$/i.test(pool.SessionsStatus || '')) {
+					featuredCards.push(createMetricCard('Peak User Count', /^NoUserActivity$/i.test(pool.SessionsStatus || '') ? 0 : pool.PeakConcurrentSessions, 'Highest concurrent sessions observed', 'accent-usage', 'PeakConcurrentSessions', pool));
+				}
+				if (!/^NoDiagnosticSettings$/i.test(pool.MetricStatus || '')) {
+					featuredCards.push(createMetricCard('Daily Active Users', /^NoUserActivity$/i.test(pool.MetricStatus || '') ? 0 : pool.DailyAverageUsers, 'Average distinct users per sampled day', 'accent-usage', 'DailyAverageUsers', pool));
+				}
+				featuredCards.forEach((card) => featuredGrid.appendChild(card));
 				const divider = document.createElement('div');
 				divider.className = 'pool-divider';
 				const grid = document.createElement('div');
@@ -2059,19 +2433,11 @@ function Write-AvdHtmlReport {
 				const details = document.createElement('div');
 				details.className = 'pool-details';
 				[
+					['Session Hosts', pool.SessionHostDetails || []],
 					['Authorised Access', createPoolAccessDetails(pool)],
 					['User Activity', createPoolUsageDetails(pool)],
-					['Pool Configuration', {
-						HostPoolType: pool.HostPoolType,
-						LoadBalancerType: pool.LoadBalancerType,
-						MaxSessionLimit: pool.MaxSessionLimit,
-						StartVMOnConnect: pool.StartVMOnConnect,
-						DomainJoinType: pool.DomainJoinType,
-						VmSkus: pool.VmSkus,
-						AgentVersions: pool.AgentVersions
-					}],
-					['Session Hosts', pool.SessionHostDetails || []],
 					['Platform Detail', {
+						StartVMOnConnect: pool.StartVMOnConnect,
 						NetworkInfo: pool.NetworkInfo,
 						RdpProperties: pool.RdpProperties,
 						SsoConfig: pool.SsoConfig,
@@ -2086,12 +2452,18 @@ function Write-AvdHtmlReport {
 					block.appendChild(summary);
 					if (value && typeof value === 'object' && typeof value.nodeType === 'number') {
 						block.appendChild(value);
+					} else if (label === 'Session Hosts' && Array.isArray(value)) {
+						block.appendChild(wrapTable(createObjectTable(value, [], { hiddenColumns: ['PublicIpAddress', 'OutboundPublicIpAddress'] })));
 					} else {
 						block.appendChild(renderStructuredValue(value, 0));
 					}
 					details.appendChild(block);
 				});
-				panel.append(title, subtitle, featuredGrid, divider, grid, details);
+				panel.append(header);
+				if (subtitle.textContent) {
+					panel.append(subtitle);
+				}
+				panel.append(poolMeta, featuredGrid, divider, grid, details);
 				stack.appendChild(panel);
 			});
 		}
@@ -2154,6 +2526,7 @@ function Write-AvdHtmlReport {
 				buildTable('primary-table', 'Applications', 'Installed application inventory from the host export.', normalizeCollection(data.Applications), ['DisplayName', 'DisplayVersion', 'Publisher', 'InstallDate', 'InstallLocation']);
 			}
 			buildStructuredSections(kind);
+			wireInteractiveSurfaces();
 		}
 
 		init();

@@ -3866,9 +3866,61 @@ function Write-AvdHtmlReport {
 # ------------------------------------------------------------------
 
 $script:_checkLabel   = ''
-$script:_ansiSupported = $host.Name -notmatch 'ISE'
+$script:_ansiSupported = $false
 $script:_spinnerSupported = $false
+$script:_fancyConsoleSupported = $false
 $script:_progressId = 1
+
+function Test-AnsiConsoleSupport {
+	if ($host.Name -match 'ISE') { return $false }
+	if ($env:TERM -eq 'dumb') { return $false }
+	if ($PSVersionTable.PSEdition -ne 'Core') { return $false }
+
+	try {
+		if ($Host.UI -and $Host.UI.SupportsVirtualTerminal) { return $true }
+	} catch {}
+
+	try {
+		if (-not ('AvdConsole.NativeMethods' -as [type])) {
+			Add-Type -Namespace AvdConsole -Name NativeMethods -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern IntPtr GetStdHandle(int nStdHandle);
+
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out int lpMode);
+
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetConsoleMode(IntPtr hConsoleHandle, int dwMode);
+'@
+		}
+
+		$stdoutHandle = [AvdConsole.NativeMethods]::GetStdHandle(-11)
+		if ($stdoutHandle -eq [IntPtr]::Zero -or $stdoutHandle -eq [IntPtr](-1)) { return $false }
+
+		$mode = 0
+		if (-not [AvdConsole.NativeMethods]::GetConsoleMode($stdoutHandle, [ref]$mode)) { return $false }
+
+		$virtualTerminalProcessing = 0x0004
+		if (($mode -band $virtualTerminalProcessing) -eq 0) {
+			[void][AvdConsole.NativeMethods]::SetConsoleMode($stdoutHandle, ($mode -bor $virtualTerminalProcessing))
+		}
+
+		$verifiedMode = 0
+		if (-not [AvdConsole.NativeMethods]::GetConsoleMode($stdoutHandle, [ref]$verifiedMode)) { return $false }
+
+		return (($verifiedMode -band $virtualTerminalProcessing) -ne 0)
+	} catch {
+		return $false
+	}
+}
+
+$script:_ansiSupported = Test-AnsiConsoleSupport
+
+try {
+	$script:_fancyConsoleSupported = $script:_ansiSupported -and ($PSVersionTable.PSEdition -eq 'Core')
+} catch {
+	$script:_fancyConsoleSupported = $false
+}
 
 try {
 	$script:_spinnerSupported = $script:_ansiSupported -and [Environment]::UserInteractive -and -not [Console]::IsOutputRedirected -and -not [Console]::IsInputRedirected
@@ -3913,27 +3965,48 @@ function Write-Banner {
 	param([string[]]$Lines)
 	$maxLen = ($Lines | Measure-Object -Property Length -Maximum).Maximum
 	$width  = [Math]::Max(60, $maxLen + 4)
-	$border = '═' * $width
 	Write-Host ''
-	Write-Host (Format-Ansi "  `e[1m`e[96m╔$border╗`e[0m")
-	foreach ($line in $Lines) {
-		$padded = ' ' + $line.PadRight($width - 1)
-		Write-Host (Format-Ansi "  `e[96m║`e[0m`e[97m$padded`e[0m`e[96m║`e[0m")
+	if ($script:_fancyConsoleSupported) {
+		$border = '═' * $width
+		Write-Host (Format-Ansi "  `e[1m`e[96m╔$border╗`e[0m")
+		foreach ($line in $Lines) {
+			$padded = ' ' + $line.PadRight($width - 1)
+			Write-Host (Format-Ansi "  `e[96m║`e[0m`e[97m$padded`e[0m`e[96m║`e[0m")
+		}
+		Write-Host (Format-Ansi "  `e[1m`e[96m╚$border╝`e[0m")
+	} else {
+		$border = '-' * $width
+		Write-Host "  +$border+"
+		foreach ($line in $Lines) {
+			$padded = ' ' + $line.PadRight($width - 1)
+			Write-Host "  |$padded|"
+		}
+		Write-Host "  +$border+"
 	}
-	Write-Host (Format-Ansi "  `e[1m`e[96m╚$border╝`e[0m")
 	Write-Host ''
 }
 
 function Write-Rule {
 	param([string]$Title = '', [int]$Width = 62)
+	$rule = if ($script:_fancyConsoleSupported) { '─' * $Width } else { '-' * $Width }
 	if (-not [string]::IsNullOrEmpty($Title)) {
 		Write-Host ''
-		Write-Host (Format-Ansi "  `e[90m$('─' * $Width)`e[0m")
-		Write-Host (Format-Ansi "  `e[1m`e[96m$Title`e[0m")
-		Write-Host (Format-Ansi "  `e[90m$('─' * $Width)`e[0m")
+		if ($script:_fancyConsoleSupported) {
+			Write-Host (Format-Ansi "  `e[90m$rule`e[0m")
+			Write-Host (Format-Ansi "  `e[1m`e[96m$Title`e[0m")
+			Write-Host (Format-Ansi "  `e[90m$rule`e[0m")
+		} else {
+			Write-Host "  $rule"
+			Write-Host "  $Title"
+			Write-Host "  $rule"
+		}
 	} else {
 		Write-Host ''
-		Write-Host (Format-Ansi "  `e[90m$('─' * $Width)`e[0m")
+		if ($script:_fancyConsoleSupported) {
+			Write-Host (Format-Ansi "  `e[90m$rule`e[0m")
+		} else {
+			Write-Host "  $rule"
+		}
 		Write-Host ''
 	}
 }
@@ -3996,7 +4069,7 @@ function Start-SpinnerRunspace {
 			$barStr = ''
 			if ($pct -ge 0) {
 				$w = 20; $f = [Math]::Min([int]($pct / 100.0 * $w), $w)
-				$barStr = "  $dim[$reset$purple$('█' * $f)$dim$('░' * ($w - $f))]$reset  $pct%"
+				$barStr = "  ${dim}[${reset}${purple}$(('█' * $f))${dim}$(('░' * ($w - $f)))]${reset}  $pct%"
 			}
 			$line    = "$purple$bold $s  $act$reset  $dim$sts$reset$barStr"
 			if ($_st.Lock.Wait(50)) {
