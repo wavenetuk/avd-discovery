@@ -5,7 +5,9 @@ Two read-only PowerShell scripts for assessing AVD environments. No Azure resour
 | Script | Runs on | Output |
 |---|---|---|
 | `scripts/Invoke-AvdMetricsCollection.ps1` | Local machine | `output/avd-metrics/<customer>-avd-metrics-<timestamp>.json` plus a sibling `.html` report |
-| `scripts/Invoke-AvdSessionHostAudit.ps1` | AVD session host | `output/vm-discovery/<customer>-<hostname>-avd-discovery-<timestamp>.json` plus a sibling `.html` report |
+| `scripts/Invoke-AvdSessionHostAudit.ps1` | AVD session host | JSON in the script folder by default, with an optional sibling `.html` report when the shared generator is available |
+
+`Invoke-HtmlReportGenerator.ps1` is portable too: it uses a local `scripts/reporting` folder when present, and if the renderer bundle is missing it downloads and caches the renderer assets from this repository's raw GitHub URLs before generating HTML.
 
 `Invoke-AvdMetricsCollection.ps1` can run `Invoke-AvdSessionHostAudit.ps1` automatically on a live session host via Azure VM Run Command (`-RunLocalDiscovery`).
 
@@ -197,6 +199,9 @@ Effective value, source (Group Policy / local WinStation / local RdServer / not 
 ```powershell
 # Basic - prompts for customer abbreviation
 .\scripts\Invoke-AvdSessionHostAudit.ps1
+
+# If the context-menu run closes too quickly, use the launcher wrapper instead
+scripts\Run-AvdSessionHostAudit.cmd
 
 # Primary applications only, custom output directory
 .\scripts\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation contoso -PrimaryApplicationsOnly -OutputDirectory C:\Temp
