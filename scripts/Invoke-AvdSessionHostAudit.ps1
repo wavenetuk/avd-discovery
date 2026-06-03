@@ -34,7 +34,7 @@ Skips the AVD endpoint connectivity tests. Use this to speed up local developmen
 Skips HTML report generation even when the shared JSON report generator script is available.
 
 SAFETY FEATURES
-  1. AST denylist assertion — the script parses its own source code at startup and throws
+	1. AST denylist assertion - the script parses its own source code at startup and throws
      before doing any discovery if a cmdlet that could mutate system or filesystem state is
      found outside the small set of permitted output-writing operations. Catches accidental
      write operations introduced by future edits before any discovery work is performed.
@@ -45,7 +45,7 @@ SAFETY FEATURES
      Set-Content (JSON export), Move-Item (gpresult HTML relocation), Remove-Item (gpresult
      temp file cleanup).
 
-  2. FSLogix share access is read-only — profile container paths are scanned using
+	2. FSLogix share access is read-only - profile container paths are scanned using
      Get-ChildItem with -File to enumerate VHD/VHDX files and read their Length property.
      No files are opened, modified, or deleted.
 
@@ -90,15 +90,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:PrimaryApplicationConfig = $null
-$script:AuditTranscriptPath = Join-Path -Path $PSScriptRoot -ChildPath 'Invoke-AvdSessionHostAudit.transcript.txt'
-$script:AuditFailureLogPath = Join-Path -Path $PSScriptRoot -ChildPath 'Invoke-AvdSessionHostAudit.error.log'
-
-try {
-	Start-Transcript -Path $script:AuditTranscriptPath -Force | Out-Null
-}
-catch {
-	$script:AuditTranscriptPath = $null
-}
+$script:AuditTranscriptPath = $null
+$script:AuditFailureLogPath = $null
+$script:AuditPortableMode = $false
+$script:AuditArchiveBaseName = $null
+$script:AuditGeneratedArtifacts = [System.Collections.Generic.List[string]]::new()
+$script:AuditArchivePath = $null
+$script:AuditExitCode = 0
 
 # ------------------------------------------------------------------
 # Read-only safeguards
@@ -128,7 +126,7 @@ function Assert-ScriptIsReadOnly {
 		'Unregister-ScheduledTask'  # scheduled task deletion
 	)
 
-	# These cmdlets write output files only — they are intentional and permitted.
+	# These cmdlets write output files only - they are intentional and permitted.
 	# New-Item       : creates the output directory
 	# Set-Content    : writes the JSON export
 	# Move-Item      : relocates gpresult HTML from temp to output path
@@ -597,27 +595,27 @@ function Get-EntraSsoDiscovery {
 	$_notes      = [System.Collections.Generic.List[string]]::new()
 
 	if (-not $_isAadJoined) {
-		$_blockers.Add('Device is not Entra ID joined — Entra SSO requires AzureADJoined or HybridAzureADJoined') | Out-Null
+		$_blockers.Add('Device is not Entra ID joined - Entra SSO requires AzureADJoined or HybridAzureADJoined') | Out-Null
 	}
 
 	if ($_isHaadj -and -not $_cloudKerb) {
-		$_advisories.Add('Hybrid Entra joined but Cloud Kerberos Trust not enabled — Kerberos SSO to on-premises resources may not work') | Out-Null
+		$_advisories.Add('Hybrid Entra joined but Cloud Kerberos Trust not enabled - Kerberos SSO to on-premises resources may not work') | Out-Null
 	}
 
 	if ($null -eq $dsReg -or $dsReg.AzureAdPrt -ne $true) {
 		if ($script:IsSystemAccountMode) {
-			$_notes.Add('PRT state is unavailable when running as SYSTEM account — run interactively for per-user PRT data') | Out-Null
+			$_notes.Add('PRT state is unavailable when running as SYSTEM account - run interactively for per-user PRT data') | Out-Null
 		} elseif ($_isAadJoined) {
-			$_advisories.Add('No Azure AD PRT detected for the running account — users may be prompted to authenticate') | Out-Null
+			$_advisories.Add('No Azure AD PRT detected for the running account - users may be prompted to authenticate') | Out-Null
 		}
 	}
 
 	if ($_isAadJoined -and $null -ne $dsReg -and $dsReg.WamDefaultSet -ne $true) {
-		$_advisories.Add('WAM (Web Account Manager) is not the default credential broker — modern authentication SSO may be impaired') | Out-Null
+		$_advisories.Add('WAM (Web Account Manager) is not the default credential broker - modern authentication SSO may be impaired') | Out-Null
 	}
 
 	if ($_credGuard) {
-		$_notes.Add('Credential Guard is enabled — NTLM and legacy credential delegation are blocked (expected in a secure AVD environment)') | Out-Null
+		$_notes.Add('Credential Guard is enabled - NTLM and legacy credential delegation are blocked (expected in a secure AVD environment)') | Out-Null
 	}
 
 	[PSCustomObject]@{
@@ -667,7 +665,7 @@ function Get-IntuneEnrollmentDiscovery {
 	# Intune-specific: MDM enrollment sub-key written by the Intune management extension
 	$intuneRecords = @($enrollmentRecords | Where-Object { $_.ProviderID -eq 'MS DM Server' -or $_.ProviderID -like '*Intune*' })
 
-	# PolicyManager device detail — populated when a device is Intune-managed
+	# PolicyManager device detail - populated when a device is Intune-managed
 	$policyManagerDevice = Get-RegistryKeyValues -Path 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device'
 
 	# Intune Management Extension service
@@ -762,7 +760,7 @@ function Get-OutlookCachedModeDiscovery {
 		}
 	}
 
-	# Per-user cached mode settings — skip when running as SYSTEM/machine account (no user hive loaded)
+	# Per-user cached mode settings - skip when running as SYSTEM/machine account (no user hive loaded)
 	$loadedUsers = if ($script:IsSystemAccountMode) { @() } else { Get-LoadedUserProfiles }
 	$userSettings = foreach ($user in $loadedUsers) {
 		$userVersionSettings = foreach ($version in $officeVersions) {
@@ -810,7 +808,7 @@ function Get-OutlookCachedModeDiscovery {
 
 	[PSCustomObject]@{
 		EffectiveState          = $effectiveState
-		Note                    = if ($script:IsSystemAccountMode) { 'Per-user Outlook cached mode registry settings skipped — script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to collect user-specific data.' } else { $null }
+		Note                    = if ($script:IsSystemAccountMode) { 'Per-user Outlook cached mode registry settings skipped - script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to collect user-specific data.' } else { $null }
 		PolicyConfigured        = @($machinePolicySettings).Count -gt 0
 		PolicyEnableValue       = $policyEnableValue
 		MachinePolicySettings   = @($machinePolicySettings)
@@ -921,7 +919,7 @@ function Get-FSLogixAppMaskingDiscovery {
 	}
 
 	# HKLM:\SOFTWARE\FSLogix\Apps is written by the installer with InstallPath/InstallVersion.
-	# Those keys are not App Masking configuration — exclude them when deciding if App Masking
+	# Those keys are not App Masking configuration - exclude them when deciding if App Masking
 	# has been deliberately configured.
 	$installerOnlyKeys = @('InstallPath', 'InstallVersion')
 	$localConfigHasMaskingSettings = $null -ne $localConfig -and
@@ -1356,7 +1354,7 @@ function Get-OneDriveAndFolderRedirectionDiscovery {
 
 	[PSCustomObject]@{
 		OneDrivePolicies              = Get-OneDrivePolicyState
-		Note                          = if ($script:IsSystemAccountMode) { 'Per-user shell folder, folder redirection, and mapped drive data skipped — script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to collect user-specific data.' } else { $null }
+		Note                          = if ($script:IsSystemAccountMode) { 'Per-user shell folder, folder redirection, and mapped drive data skipped - script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to collect user-specific data.' } else { $null }
 		LoadedUserCount               = @($loadedUsers).Count
 		UsersWithKnownFolderMove      = @($userStates | Where-Object { $_.LikelyOneDriveKnownFolderMove }).Count
 		UsersWithFolderRedirection    = @($userStates | Where-Object { $_.LikelyFolderRedirection }).Count
@@ -1547,7 +1545,7 @@ function Test-TcpEndpoint {
 	}
 }
 
-function Get-AvdConnectivityDiscovery {
+function Get-AvdConnectivityEndpointChecks {
 	Set-StrictMode -Off
 	try {
 		$endpoints = @(
@@ -1572,81 +1570,61 @@ function Get-AvdConnectivityDiscovery {
 			[PSCustomObject]@{ Hostname = 'crl.microsoft.com';                          Port = 80;   Category = 'CertificateValidation'; Required = $true  }
 			[PSCustomObject]@{ Hostname = '169.254.169.254';                            Port = 80;   Category = 'AzureIMDS';             Required = $false }
 		)
-		$results = @()
-		$requiredResults = @()
-		$requiredPassed = @()
-		$requiredFailed = @()
 
-		Write-Host '  Testing AVD network connectivity endpoints...' -ForegroundColor DarkGray
-		Write-Host ''
-
+		$connectivityChecks = [System.Collections.ArrayList]::new()
 		foreach ($endpoint in $endpoints) {
 			$label = "$($endpoint.Hostname):$($endpoint.Port)"
 			$requiredLabel = if ($endpoint.Required) { '[Required]' } else { '[Optional]' }
-			Write-Host -NoNewline "  $requiredLabel $($endpoint.Category.PadRight(22)) $label ... " -ForegroundColor Gray
 
-			$result = Test-TcpEndpoint -Hostname $endpoint.Hostname -Port $endpoint.Port
+			$check = Test-TcpEndpoint -Hostname $endpoint.Hostname -Port $endpoint.Port
 
-			if ($result.Connected) {
-				Write-Host (Format-Ansi "`e[92mOK  ($($result.LatencyMs)ms)`e[0m")
-			}
-			else {
-				Write-Host (Format-Ansi "`e[91mFAILED  — $($result.Error)`e[0m")
-			}
-
-			$results += [PSCustomObject]@{
+			[void]$connectivityChecks.Add([PSCustomObject]@{
 				Hostname  = $endpoint.Hostname
 				Port      = $endpoint.Port
 				Category  = $endpoint.Category
 				Required  = $endpoint.Required
-				Connected = $result.Connected
-				LatencyMs = $result.LatencyMs
-				Error     = $result.Error
-			}
+				Connected = $check.Connected
+				LatencyMs = $check.LatencyMs
+				Error     = $check.Error
+			})
 		}
 
-		for ($summaryIndex = 0; $summaryIndex -lt $results.Count; $summaryIndex++) {
-			$resultItem = $results[$summaryIndex]
-			if ($resultItem.Required) {
-				$requiredResults += $resultItem
-				if ($resultItem.Connected) {
-					$requiredPassed += $resultItem
-				} else {
-					$requiredFailed += $resultItem
-				}
-			}
-		}
+		return @($connectivityChecks)
+	}
+	finally {
+		Set-StrictMode -Version Latest
+	}
+}
+
+function Get-AvdConnectivityDiscovery {
+	Set-StrictMode -Off
+	try {
+		$connectivityChecks = @(Get-AvdConnectivityEndpointChecks)
+		$requiredChecks = @($connectivityChecks | Where-Object { $_.Required })
+		$passedChecks = @($requiredChecks | Where-Object { $_.Connected })
+		$failedChecks = @($requiredChecks | Where-Object { -not $_.Connected })
+		$notableChecks = @($connectivityChecks | Where-Object { -not $_.Connected })
 
 		Write-Host ''
-		if ($requiredFailed.Count -eq 0) {
-			Write-Host (Format-Ansi ("  `e[92m{0}/{1} required endpoints reachable`e[0m" -f $requiredPassed.Count, $requiredResults.Count))
+		$_reachStr = "$($passedChecks.Count)/$($requiredChecks.Count) required endpoints reachable"
+		if ($failedChecks.Count -eq 0) {
+			Write-Host (Format-Ansi "  `e[92m$_reachStr`e[0m")
 		} else {
-			Write-Host (Format-Ansi ("  `e[93m{0}/{1} required endpoints reachable`e[0m" -f $requiredPassed.Count, $requiredResults.Count))
+			Write-Host (Format-Ansi "  `e[93m$_reachStr`e[0m")
 			Write-Host (Format-Ansi "  `e[93mFailed required endpoints:`e[0m")
-			for ($failureIndex = 0; $failureIndex -lt $requiredFailed.Count; $failureIndex++) {
-				$failedEndpoint = $requiredFailed[$failureIndex]
-				Write-Host (Format-Ansi "    `e[91m— $($failedEndpoint.Hostname):$($failedEndpoint.Port)  ($($failedEndpoint.Error))`e[0m")
+			foreach ($failedCheck in $failedChecks) {
+				Write-Host (Format-Ansi "    `e[91m- $($failedCheck.Hostname):$($failedCheck.Port)  ($($failedCheck.Error))`e[0m")
 			}
 		}
 		Write-Host ''
-
-		# Only emit results that are notable: required failures and optional failures.
-		# All-passing required endpoints are omitted to keep the output compact.
-		$notableResults = @()
-		for ($notableIndex = 0; $notableIndex -lt $results.Count; $notableIndex++) {
-			$resultItem = $results[$notableIndex]
-			if (-not $resultItem.Connected) {
-				$notableResults += $resultItem
-			}
-		}
 
 		[PSCustomObject]@{
-			AllRequiredReachable     = $requiredFailed.Count -eq 0
-			RequiredEndpointCount    = $requiredResults.Count
-			RequiredReachableCount   = $requiredPassed.Count
-			RequiredUnreachableCount = $requiredFailed.Count
-			FailedEndpoints          = @($notableResults)
-			Results                  = @($results)
+			AllRequiredReachable     = $failedChecks.Count -eq 0
+			RequiredEndpointCount    = $requiredChecks.Count
+			RequiredReachableCount   = $passedChecks.Count
+			RequiredUnreachableCount = $failedChecks.Count
+			FailedEndpoints          = @($notableChecks)
+			Results                  = @($connectivityChecks)
 		}
 	}
 	finally {
@@ -1658,7 +1636,7 @@ function Get-TeamsMediaOptimizationDiscovery {
 	# WebRTC redirector service
 	$webRtcService = Get-Service -Name 'RDWebRTCSvc' -ErrorAction SilentlyContinue
 
-	# WebRTC redirector binary — derive version from the installed executable
+	# WebRTC redirector binary - derive version from the installed executable
 	$webRtcBinaryPaths = @(
 		'C:\Program Files\Microsoft Remote Desktop WebRTC Redirector\RDWebRTCSvc.exe',
 		'C:\Program Files (x86)\Microsoft Remote Desktop WebRTC Redirector\RDWebRTCSvc.exe'
@@ -1676,7 +1654,7 @@ function Get-TeamsMediaOptimizationDiscovery {
 		}
 	}
 
-	# IsWVDEnvironment registry key — required for new Teams (2.x) media optimization
+	# IsWVDEnvironment registry key - required for new Teams (2.x) media optimization
 	$teamsRegistryConfig = Get-RegistryKeyValues -Path 'HKLM:\SOFTWARE\Microsoft\Teams'
 	$isWvdEnvironment = if ($null -eq $teamsRegistryConfig) { $null } else { Get-OptionalPropertyValue -Object $teamsRegistryConfig -PropertyName 'IsWVDEnvironment' }
 
@@ -1865,7 +1843,7 @@ function Get-ConfigFileServerReferences {
 	<#
 	.SYNOPSIS
 	Scans application config files under Program Files for references to remote servers
-	or domain-joined machines — UNC paths, FQDNs, and connection-string server keywords.
+	or domain-joined machines - UNC paths, FQDNs, and connection-string server keywords.
 	Only text-based config file types up to 1 MB are inspected. Windows system directories
 	and common redistributable/framework folders are excluded to reduce noise.
 	#>
@@ -1878,7 +1856,7 @@ function Get-ConfigFileServerReferences {
 	# File extensions to scan (text-based config formats only)
 	$configExtensions = @('.ini', '.cfg', '.config', '.xml', '.conf', '.properties', '.env', '.yaml', '.yml')
 
-	# Folder name fragments to skip — Windows components, runtimes, redistributables
+	# Folder name fragments to skip - Windows components, runtimes, redistributables
 	$excludedFolderPatterns = @(
 		'Windows NT', 'Windows Kits', 'Windows Mail', 'Windows Media',
 		'Microsoft.NET', 'dotnet', 'Microsoft Visual C++', 'Microsoft Visual Studio',
@@ -2015,7 +1993,7 @@ function Get-ActiveDirectoryDependencyDiscovery {
 	}
 	catch { }
 
-	# --- ODBC data sources (system DSNs — 32-bit and 64-bit) ---
+	# --- ODBC data sources (system DSNs - 32-bit and 64-bit) ---
 	$odbcSources = @()
 	try {
 		$odbcPaths = @(
@@ -2066,7 +2044,7 @@ function Get-ActiveDirectoryDependencyDiscovery {
 	# 88=Kerberos, 135=RPC/EPM, 389=LDAP, 445=SMB, 464=Kpasswd,
 	# 636=LDAPS, 3268=GC-LDAP, 3269=GC-LDAPS
 	#
-	# Connections are grouped by {RemoteAddress, RemotePort} — an AVD host can have
+	# Connections are grouped by {RemoteAddress, RemotePort} - an AVD host can have
 	# thousands of active SMB sessions to the same file server, so emitting each
 	# individual connection would produce a huge payload.
 	$adPorts = @(88, 135, 389, 445, 464, 636, 3268, 3269)
@@ -2166,7 +2144,7 @@ function Get-GroupPolicyDiscovery {
 
 	[PSCustomObject]@{
 		Succeeded        = $succeeded
-		Note             = if ($script:IsSystemAccountMode -and $succeeded) { 'Report contains computer policy only (no user RSoP) — script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to include user Group Policy.' } else { $null }
+		Note             = if ($script:IsSystemAccountMode -and $succeeded) { 'Report contains computer policy only (no user RSoP) - script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to include user Group Policy.' } else { $null }
 		HtmlReportPath   = if ($succeeded) { $OutputPath } else { $null }
 		Error            = $errorMessage
 	}
@@ -2181,7 +2159,7 @@ function Get-PrimaryApplicationConfigPath {
 	foreach ($path in $candidates) {
 		if (Test-Path -Path $path) { return $path }
 	}
-	return $candidates[0]  # not found — caller will handle the null return from Get-PrimaryApplicationConfig
+	return $candidates[0]  # not found - caller will handle the null return from Get-PrimaryApplicationConfig
 }
 
 function Get-PrimaryApplicationConfig {
@@ -2261,7 +2239,7 @@ function Test-PrimaryApplication {
 	}
 
 	if ($null -eq $script:PrimaryApplicationConfig) {
-		return $true  # no config loaded — include all applications
+		return $true  # no config loaded - include all applications
 	}
 
 	$namePatterns = $script:PrimaryApplicationConfig.PrimaryApplicationFilters.NamePatterns
@@ -2365,13 +2343,13 @@ function Get-RdpShortpathDiscovery {
 	Reports whether RDP Shortpath is configured and whether it has been used recently.
 
 	.DESCRIPTION
-	RDP Shortpath has two independent modes — both can be enabled simultaneously:
+	RDP Shortpath has two independent modes - both can be enabled simultaneously:
 
-	  Managed Networks  — UDP transport over ExpressRoute/VPN/direct LAN. Enabled by setting
+	  Managed Networks  - UDP transport over ExpressRoute/VPN/direct LAN. Enabled by setting
 	                      fUseUdpPortRedirector = 1 in the WinStation or Group Policy hive.
 	                      Listens on a configurable UDP port (default 3390).
 
-	  Public Networks   — UDP transport over the internet using STUN/TURN. Enabled by setting
+	  Public Networks   - UDP transport over the internet using STUN/TURN. Enabled by setting
 	                      ICEControl = 2 in the same hives. Requires the AVD host agent and
 	                      outbound UDP to the STUN endpoints. No fixed inbound port required.
 
@@ -2381,8 +2359,8 @@ function Get-RdpShortpathDiscovery {
 	  3. HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server  (RD Session Host)
 
 	Recent usage is inferred from the RdpCoreTS operational event log:
-	  Event 131 — "Shortpath transport established" (managed or public network)
-	  Event 70  — "A connection was established using UDP transport" (legacy UDP indicator)
+	  Event 131 - "Shortpath transport established" (managed or public network)
+	  Event 70  - "A connection was established using UDP transport" (legacy UDP indicator)
 
 	UdpListenerActive reports whether the configured UDP port has an active listener, which
 	confirms the service is running and the firewall has not silently blocked the bind.
@@ -2443,7 +2421,7 @@ function Get-RdpShortpathDiscovery {
 		default { "Unknown ($($iceFlag.RawValue))" }
 	}
 
-	# --- Recent usage — RdpCoreTS operational event log ---
+	# --- Recent usage - RdpCoreTS operational event log ---
 	# Event 131: "Shortpath transport established for RDP connection"
 	# Event 70:  "A connection was established using UDP transport" (older builds)
 	$shortpathUsedRecently   = $false
@@ -2481,7 +2459,7 @@ function Get-RdpShortpathDiscovery {
 	}
 	catch { }
 
-	# --- AVD host agent — carries the STUN/TURN client needed for public Shortpath ---
+	# --- AVD host agent - carries the STUN/TURN client needed for public Shortpath ---
 	$agentService = Get-Service -Name 'RDAgentBootLoader' -ErrorAction SilentlyContinue
 	$agentVersion = $null
 	$agentBinaryPaths = @(
@@ -2528,7 +2506,7 @@ function Get-RdpRedirectionDiscovery {
 
 	.DESCRIPTION
 	Reads three registry hives in priority order:
-	  1. HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services  (Group Policy — highest precedence)
+	  1. HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services  (Group Policy - highest precedence)
 	  2. HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp  (local WinStation config)
 	  3. HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server  (general RD Session Host settings)
 
@@ -2678,6 +2656,62 @@ function Get-CustomerAbbreviation {
 	return $abbreviation.ToLowerInvariant()
 }
 
+function ConvertTo-SafePathSegment {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Value
+	)
+
+	$segment = Get-NormalizedText -Value $Value
+	if ([string]::IsNullOrWhiteSpace($segment)) {
+		return 'customer'
+	}
+
+	$segment = $segment -replace '[<>:"/\\|?*]+', '-'
+	$segment = $segment.Trim(' ', '.', '-', '_')
+	if ([string]::IsNullOrWhiteSpace($segment)) {
+		return 'customer'
+	}
+
+	return $segment
+}
+
+function Test-RepoLayoutAvailable {
+	$repoRoot = Split-Path -Path $PSScriptRoot -Parent
+	$requiredPaths = @(
+		(Join-Path $repoRoot 'config\appExclusions.config.json'),
+		(Join-Path $repoRoot 'scripts\Invoke-HtmlReportGenerator.ps1')
+	)
+
+	foreach ($path in $requiredPaths) {
+		if (-not (Test-Path -Path $path)) {
+			return $false
+		}
+	}
+
+	return $true
+}
+
+function Resolve-AuditOutputDirectory {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$CustomerCode,
+
+		[Parameter(Mandatory = $false)]
+		[string]$RequestedOutputDirectory
+	)
+
+	if (-not [string]::IsNullOrWhiteSpace($RequestedOutputDirectory)) {
+		return [System.IO.Path]::GetFullPath($RequestedOutputDirectory)
+	}
+
+	if (Test-RepoLayoutAvailable) {
+		return (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'output\vm-discovery')
+	}
+
+	return $PSScriptRoot
+}
+
 function New-ExportFilePath {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -2769,6 +2803,103 @@ function Write-SessionHostAuditFailureLog {
 
 	$body | Set-Content -Path $logPath -Encoding UTF8
 	return $logPath
+}
+
+function Add-SessionHostAuditArtifact {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Path
+	)
+
+	if ([string]::IsNullOrWhiteSpace($Path)) {
+		return
+	}
+
+	[void]$script:AuditGeneratedArtifacts.Add($Path)
+}
+
+function Compress-PortableAuditArtifacts {
+	param(
+		[Parameter(Mandatory = $false)]
+		[string]$SourceDirectory,
+
+		[Parameter(Mandatory = $false)]
+		[string]$ArchiveBaseName
+	)
+
+	if (-not $script:AuditPortableMode) {
+		return $null
+	}
+
+	if ([string]::IsNullOrWhiteSpace($SourceDirectory)) {
+		return $null
+	}
+
+	if ([string]::IsNullOrWhiteSpace($ArchiveBaseName)) {
+		$ArchiveBaseName = 'audit-results'
+	}
+
+	$existingArtifacts = @(
+		$script:AuditGeneratedArtifacts |
+			Where-Object {
+				-not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -Path $_)
+			} |
+			Sort-Object -Unique
+	)
+
+	if ($existingArtifacts.Count -eq 0) {
+		return $null
+	}
+
+	$archiveName = '{0}.zip' -f $ArchiveBaseName
+	$archivePath = Join-Path -Path $SourceDirectory -ChildPath $archiveName
+	if (Test-Path -Path $archivePath) {
+		Remove-Item -Path $archivePath -Force
+	}
+
+	Compress-Archive -Path $existingArtifacts -DestinationPath $archivePath -Force
+	return $archivePath
+}
+
+function Remove-PortableAuditArtifacts {
+	param(
+		[Parameter(Mandatory = $false)]
+		[string]$ArchivePath,
+
+		[Parameter(Mandatory = $false)]
+		[string[]]$PreservePaths = @()
+	)
+
+	if (-not $script:AuditPortableMode) {
+		return
+	}
+
+	$normalizedPreservePaths = @(
+		$PreservePaths |
+			Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+			ForEach-Object { $_.TrimEnd() } |
+			Sort-Object -Unique
+	)
+
+	$artifactPaths = @(
+		$script:AuditGeneratedArtifacts |
+			Where-Object {
+				-not [string]::IsNullOrWhiteSpace($_) -and
+				(Test-Path -Path $_) -and
+				($_.TrimEnd() -ne $ArchivePath) -and
+				($_.TrimEnd() -notin $normalizedPreservePaths)
+			} |
+			Sort-Object -Unique
+	)
+
+	foreach ($artifactPath in $artifactPaths) {
+		try {
+			Remove-Item -Path $artifactPath -Force -ErrorAction Stop
+		}
+		catch {
+			Write-Warning "Could not remove portable artifact '$artifactPath': $($_.Exception.Message)"
+		}
+	}
 }
 
 # ------------------------------------------------------------------
@@ -3084,6 +3215,21 @@ try {
 
 	$script:PrimaryApplicationConfig = Get-PrimaryApplicationConfig -ConfigPath (Get-PrimaryApplicationConfigPath)
 	$customerCode = Get-CustomerAbbreviation -Value $CustomerAbbreviation
+	$script:AuditPortableMode = [string]::IsNullOrWhiteSpace($OutputDirectory) -and -not (Test-RepoLayoutAvailable)
+	$script:AuditArchiveBaseName = '{0}-audit-results' -f (ConvertTo-SafePathSegment -Value $customerCode)
+	$resolvedOutputDirectory = $null
+	$resolvedOutputDirectory = Resolve-AuditOutputDirectory -CustomerCode $customerCode -RequestedOutputDirectory $OutputDirectory
+	if (-not (Test-Path -Path $resolvedOutputDirectory)) {
+		New-Item -ItemType Directory -Path $resolvedOutputDirectory -Force | Out-Null
+	}
+	$script:AuditTranscriptPath = Join-Path -Path $resolvedOutputDirectory -ChildPath 'Invoke-AvdSessionHostAudit.transcript.txt'
+	$script:AuditFailureLogPath = Join-Path -Path $resolvedOutputDirectory -ChildPath 'Invoke-AvdSessionHostAudit.error.log'
+	try {
+		Start-Transcript -Path $script:AuditTranscriptPath -Force | Out-Null
+	}
+	catch {
+		$script:AuditTranscriptPath = $null
+	}
 	$scriptStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 	$resolvedOutputPath = $null
 
@@ -3187,19 +3333,28 @@ try {
 	$rdpShortpathDiscovery = Get-RdpShortpathDiscovery
 	Write-CheckResult 'Success'
 
-	$resolvedOutputDirectory = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $PSScriptRoot } else { [System.IO.Path]::GetFullPath($OutputDirectory) }
 	$resolvedOutputPath = New-ExportFilePath -Directory $resolvedOutputDirectory -CustomerCode $customerCode -Hostname $machineDetails.Hostname
 	$outputDirectory = Split-Path -Path $resolvedOutputPath -Parent
 
 	if (-not [string]::IsNullOrWhiteSpace($outputDirectory) -and -not (Test-Path -Path $outputDirectory)) {
 		New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 	}
+	Add-SessionHostAuditArtifact -Path $resolvedOutputPath
 
 	Write-CheckStart 'Group Policy'
-	$gpResultHtmlPath = if ($NoGpresult.IsPresent) { $null } else { [System.IO.Path]::ChangeExtension($resolvedOutputPath, '.gpresult.html') }
+	$shouldRunGpresult = -not $NoGpresult.IsPresent -and [bool]$joinDiscovery.PartOfDomain
+	$gpResultHtmlPath = if ($shouldRunGpresult) { [System.IO.Path]::ChangeExtension($resolvedOutputPath, '.gpresult.html') } else { $null }
 	$groupPolicyDiscovery = if ($NoGpresult.IsPresent) {
 		Write-CheckResult 'Skipped' '-NoGpresult specified'
 		$null
+	} elseif (-not [bool]$joinDiscovery.PartOfDomain) {
+		Write-CheckResult 'Skipped' 'machine is not Active Directory joined'
+		[PSCustomObject]@{
+			Succeeded      = $false
+			Note           = 'Skipped because machine is not Active Directory joined'
+			HtmlReportPath = $null
+			Error          = $null
+		}
 	} else {
 		$_gp = Get-GroupPolicyDiscovery -OutputPath $gpResultHtmlPath
 		if ($_gp.Succeeded) {
@@ -3270,6 +3425,9 @@ try {
 	$resolvedHtmlPath = [System.IO.Path]::ChangeExtension($resolvedOutputPath, '.html')
 	if (-not $NoHtml.IsPresent) {
 		$exportObject.HtmlGeneration = Invoke-OptionalHtmlReportGeneration -JsonPath $resolvedOutputPath -ReportType $exportObject.ReportType -OutputPath $resolvedHtmlPath
+		if ($exportObject.HtmlGeneration.Status -eq 'Generated' -and -not [string]::IsNullOrWhiteSpace($exportObject.HtmlGeneration.HtmlPath)) {
+			Add-SessionHostAuditArtifact -Path $exportObject.HtmlGeneration.HtmlPath
+		}
 	}
 
 	$exportObject | ConvertTo-Json -Depth 10 |
@@ -3291,6 +3449,7 @@ try {
 	}
 	if ($null -ne $groupPolicyDiscovery -and $groupPolicyDiscovery.Succeeded) {
 		Write-Host "  GP report     :  $gpResultHtmlPath" -ForegroundColor Cyan
+		Add-SessionHostAuditArtifact -Path $gpResultHtmlPath
 	}
 	Write-Host ''
 }
@@ -3300,6 +3459,10 @@ catch {
 	$failureLogPath = $null
 	try {
 		$failureLogPath = Write-SessionHostAuditFailureLog -ErrorRecord $_ -PreferredPath $resolvedOutputPath
+		Add-SessionHostAuditArtifact -Path $failureLogPath
+		if (-not [string]::IsNullOrWhiteSpace($script:AuditTranscriptPath) -and (Test-Path -Path $script:AuditTranscriptPath)) {
+			Add-SessionHostAuditArtifact -Path $script:AuditTranscriptPath
+		}
 	}
 	catch {
 		$failureLogPath = $null
@@ -3311,7 +3474,7 @@ catch {
 	}
 	Write-Error $failureMessage
 	Wait-ForInteractiveErrorAcknowledgement -Message 'The script failed. Review the error above, then press Enter to close this window.'
-	exit 1
+	$script:AuditExitCode = 1
 }
 finally {
 	try {
@@ -3319,5 +3482,24 @@ finally {
 	}
 	catch {
 	}
+
+	try {
+		if ($script:AuditExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($script:AuditTranscriptPath) -and (Test-Path -Path $script:AuditTranscriptPath)) {
+			Remove-Item -Path $script:AuditTranscriptPath -Force
+		}
+
+		$script:AuditArchivePath = Compress-PortableAuditArtifacts -SourceDirectory $resolvedOutputDirectory -ArchiveBaseName $script:AuditArchiveBaseName
+		if (-not [string]::IsNullOrWhiteSpace($script:AuditArchivePath)) {
+			Write-Host "  Portable ZIP :  $script:AuditArchivePath" -ForegroundColor Cyan
+			Remove-PortableAuditArtifacts -ArchivePath $script:AuditArchivePath -PreservePaths @($script:AuditTranscriptPath)
+		}
+	}
+	catch {
+		Write-Warning "Portable ZIP creation failed: $($_.Exception.Message)"
+	}
+}
+
+if ($script:AuditExitCode -ne 0) {
+	exit $script:AuditExitCode
 }
 
