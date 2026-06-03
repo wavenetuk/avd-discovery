@@ -552,6 +552,34 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			return numeric === null ? 'Omitted' : (formatValue(numeric) + '%');
 		}
 
+		let poolTrendRevealObserver = null;
+		function wirePoolTrendReveal(card) {
+			if (!card) { return; }
+			if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+				card.classList.add('is-trend-visible');
+				return;
+			}
+			if (typeof IntersectionObserver !== 'function') {
+				card.classList.add('is-trend-visible');
+				return;
+			}
+			if (!poolTrendRevealObserver) {
+				poolTrendRevealObserver = new IntersectionObserver((entries, observer) => {
+					entries.forEach((entry) => {
+						if (!entry.isIntersecting) { return; }
+						requestAnimationFrame(() => {
+							entry.target.classList.add('is-trend-visible');
+						});
+						observer.unobserve(entry.target);
+					});
+				}, {
+					threshold: 0.35,
+					rootMargin: '0px 0px -10% 0px'
+				});
+			}
+			poolTrendRevealObserver.observe(card);
+		}
+
 		function createPoolPerformanceTrend(pool) {
 			const cpuSeries = parseDailyMetricSeries(pool && pool.CpuDailyBreakdown, 'AvgCpuPercent');
 			const memorySeries = parseDailyMetricSeries(pool && pool.MemoryDailyBreakdown, 'AvgMemUsedPercent');
@@ -763,6 +791,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 
 			plot.append(svg, yAxis, xAxis);
 			card.append(head, legend, plot, tooltip);
+			wirePoolTrendReveal(card);
 			return card;
 		}
 
@@ -1333,9 +1362,13 @@ const REPORT_TITLE = __REPORT_TITLE__;
 
 		function createObjectTable(rows, preferredKeys, options) {
 			if (!rows.length) {
-				const empty = document.createElement('p');
-				empty.className = 'muted';
-				empty.textContent = 'No rows available.';
+				const empty = document.createElement('div');
+				empty.className = 'table-empty-state';
+				const title = document.createElement('strong');
+				title.textContent = 'No rows available';
+				const detail = document.createElement('span');
+				detail.textContent = 'This section does not contain any records.';
+				empty.append(title, detail);
 				return empty;
 			}
 			const tableOptions = options || {};

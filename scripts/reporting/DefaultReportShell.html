@@ -1065,6 +1065,37 @@
 			font-size: 14px;
 			min-width: 760px;
 		}
+		table.connectivity-table {
+			table-layout: fixed;
+		}
+		table.connectivity-table th:nth-child(1),
+		table.connectivity-table td:nth-child(1) {
+			width: 30%;
+		}
+		table.connectivity-table th:nth-child(2),
+		table.connectivity-table td:nth-child(2) {
+			width: 8%;
+		}
+		table.connectivity-table th:nth-child(3),
+		table.connectivity-table td:nth-child(3) {
+			width: 16%;
+		}
+		table.connectivity-table th:nth-child(4),
+		table.connectivity-table td:nth-child(4) {
+			width: 8%;
+		}
+		table.connectivity-table th:nth-child(5),
+		table.connectivity-table td:nth-child(5) {
+			width: 8%;
+		}
+		table.connectivity-table th:nth-child(6),
+		table.connectivity-table td:nth-child(6) {
+			width: 10%;
+		}
+		table.connectivity-table th:nth-child(7),
+		table.connectivity-table td:nth-child(7) {
+			width: 20%;
+		}
 		th, td {
 			padding: 12px 10px;
 			text-align: left;
@@ -1073,6 +1104,11 @@
 			white-space: nowrap;
 			overflow-wrap: normal;
 			word-break: normal;
+		}
+		table.connectivity-table th,
+		table.connectivity-table td {
+			white-space: normal;
+			overflow-wrap: anywhere;
 		}
 		th {
 			font-size: 12px;
@@ -1130,6 +1166,33 @@
 			box-shadow: var(--table-wrap-shadow);
 			backdrop-filter: blur(12px) saturate(108%);
 			-webkit-backdrop-filter: blur(12px) saturate(108%);
+		}
+		.table-empty-state {
+			display: grid;
+			gap: 6px;
+			align-content: center;
+			justify-items: center;
+			min-height: 92px;
+			padding: 18px 20px;
+			width: 100%;
+			box-sizing: border-box;
+			text-align: center;
+			color: var(--muted);
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.36), rgba(255, 255, 255, 0.20));
+		}
+		html[data-theme="dark"] .table-empty-state {
+			background: linear-gradient(180deg, rgba(15, 23, 42, 0.40), rgba(15, 23, 42, 0.20));
+		}
+		.table-empty-state strong {
+			font-size: 14px;
+			font-weight: 700;
+			letter-spacing: -0.01em;
+			color: var(--sheet-heading);
+		}
+		.table-empty-state span {
+			font-size: 13px;
+			line-height: 1.5;
+			max-width: 46ch;
 		}
 		.badge {
 			display: inline-flex;
@@ -1927,6 +1990,14 @@
 			height: auto;
 			overflow: visible;
 			shape-rendering: geometricPrecision;
+			clip-path: inset(0 100% 0 0);
+			opacity: 0.04;
+			transition: clip-path 1100ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease;
+			will-change: clip-path, opacity;
+		}
+		.pool-trend-card.is-trend-visible .pool-trend-chart {
+			clip-path: inset(0 0 0 0);
+			opacity: 1;
 		}
 		.pool-trend-plot {
 			position: relative;
@@ -2051,6 +2122,14 @@
 		}
 		html[data-theme="dark"] .pool-trend-point {
 			stroke: rgba(8, 17, 27, 0.86);
+		}
+		@media (prefers-reduced-motion: reduce) {
+			.pool-trend-chart {
+				clip-path: none;
+				opacity: 1;
+				transition: none;
+				will-change: auto;
+			}
 		}
 		.pool-detail-static {
 			border-radius: 10px;

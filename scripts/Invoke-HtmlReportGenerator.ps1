@@ -61,6 +61,26 @@ $script:PortableRendererFileNames = @(
 	'JsonReportRenderer.AzureSessionHostAudit.Client.js'
 )
 
+function ConvertTo-SafePathSegment {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Value
+	)
+
+	$segment = ($Value | ForEach-Object { $_.ToString() }).Trim()
+	if ([string]::IsNullOrWhiteSpace($segment)) {
+		return 'customer'
+	}
+
+	$segment = $segment -replace '[<>:"/\\|?*]+', '-'
+	$segment = $segment.Trim(' ', '.', '-', '_')
+	if ([string]::IsNullOrWhiteSpace($segment)) {
+		return 'customer'
+	}
+
+	return $segment
+}
+
 function Register-AvdReportRenderer {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -136,6 +156,75 @@ function Resolve-ReportRendererDirectory {
 	return $portableDirectory
 }
 
+function Test-LocalReportRendererLayoutAvailable {
+	$candidateDirectories = @(
+		(Join-Path -Path $PSScriptRoot -ChildPath 'reporting'),
+		(Join-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -ChildPath 'scripts\reporting')
+	)
+
+	foreach ($candidateDirectory in $candidateDirectories) {
+		if (Test-Path -Path $candidateDirectory) {
+			return $true
+		}
+	}
+
+	return $false
+}
+
+function Get-PortableResultsFolderName {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$ReportType,
+
+		[Parameter(Mandatory = $false)]
+		[string]$CustomerCode
+	)
+
+	$safeCustomerCode = ConvertTo-SafePathSegment -Value $CustomerCode
+	switch ($ReportType) {
+		'AzureSessionHostAudit' { return "{0}-audit-results" -f $safeCustomerCode }
+		'AvdMetrics' { return "{0}-metrics-results" -f $safeCustomerCode }
+		default { return "{0}-report-results" -f $safeCustomerCode }
+	}
+}
+
+function Resolve-PortableOutputPath {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$ResolvedJsonPath,
+
+		[Parameter(Mandatory = $true)]
+		[string]$ResolvedReportType,
+
+		[Parameter(Mandatory = $true)]
+		$Data
+	)
+
+	$customerCode = $null
+	if ($Data.PSObject.Properties['CustomerAbbreviation'] -and -not [string]::IsNullOrWhiteSpace([string]$Data.CustomerAbbreviation)) {
+		$customerCode = [string]$Data.CustomerAbbreviation
+	}
+
+	if ([string]::IsNullOrWhiteSpace($customerCode)) {
+		$fileName = [System.IO.Path]::GetFileNameWithoutExtension($ResolvedJsonPath)
+		if ($fileName -match '^(?<code>[^-]+)-') {
+			$customerCode = $matches.code
+		}
+	}
+
+	if ([string]::IsNullOrWhiteSpace($customerCode)) {
+		$customerCode = 'customer'
+	}
+
+	$resultsFolderName = Get-PortableResultsFolderName -ReportType $ResolvedReportType -CustomerCode $customerCode
+	$resultsDirectory = Join-Path -Path $PSScriptRoot -ChildPath $resultsFolderName
+	if (-not (Test-Path -Path $resultsDirectory)) {
+		New-Item -ItemType Directory -Path $resultsDirectory -Force | Out-Null
+	}
+
+	return (Join-Path -Path $resultsDirectory -ChildPath ([System.IO.Path]::GetFileNameWithoutExtension($ResolvedJsonPath) + '.html'))
+}
+
 function Import-AvdReportRendererModules {
 	$moduleDirectory = Resolve-ReportRendererDirectory
 
@@ -151,7 +240,7 @@ function Get-JsonReportPayload {
 	)
 
 	$rawContent = Get-Content -Path $Path -Raw -Encoding UTF8
-	return ($rawContent | ConvertFrom-Json -Depth 100)
+	return ($rawContent | ConvertFrom-Json)
 }
 
 function Resolve-ReportType {
@@ -189,10 +278,12 @@ if ($null -eq $renderer) {
 	throw "No renderer is registered for report type '$resolvedReportType'. Available report types: $($available -join ', ')"
 }
 
-$resolvedOutputPath = if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+$resolvedOutputPath = if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+	[System.IO.Path]::GetFullPath($OutputPath)
+} elseif (Test-LocalReportRendererLayoutAvailable) {
 	[System.IO.Path]::ChangeExtension($resolvedJsonPath, '.html')
 } else {
-	[System.IO.Path]::GetFullPath($OutputPath)
+	Resolve-PortableOutputPath -ResolvedJsonPath $resolvedJsonPath -ResolvedReportType $resolvedReportType -Data $data
 }
 
 $writtenPath = & $renderer.RenderScript -Data $data -OutputPath $resolvedOutputPath -SourceJsonFileName (Split-Path -Path $resolvedJsonPath -Leaf)

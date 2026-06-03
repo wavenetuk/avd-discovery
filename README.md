@@ -5,9 +5,9 @@ Two read-only PowerShell scripts for assessing AVD environments. No Azure resour
 | Script | Runs on | Output |
 |---|---|---|
 | `scripts/Invoke-AvdMetricsCollection.ps1` | Local machine | `output/avd-metrics/<customer>-avd-metrics-<timestamp>.json` plus a sibling `.html` report |
-| `scripts/Invoke-AvdSessionHostAudit.ps1` | AVD session host | JSON in the script folder by default, with an optional sibling `.html` report when the shared generator is available |
+| `scripts/Invoke-AvdSessionHostAudit.ps1` | AVD session host | ZIP archive beside the script when run portably; the generated JSON, logs, and optional `.html` report are cleaned up after archiving, while the transcript is kept only when the run fails |
 
-`Invoke-HtmlReportGenerator.ps1` is portable too: it uses a local `scripts/reporting` folder when present, and if the renderer bundle is missing it downloads and caches the renderer assets from this repository's raw GitHub URLs before generating HTML.
+`Invoke-HtmlReportGenerator.ps1` is portable too: it uses a local `scripts/reporting` folder when present, and if the renderer bundle is missing it downloads and caches the renderer assets from this repository's raw GitHub URLs before generating HTML. When run portably without `-OutputPath`, it writes the HTML into the same `scripts/<customer>-audit-results/` folder.
 
 `Invoke-AvdMetricsCollection.ps1` can run `Invoke-AvdSessionHostAudit.ps1` automatically on a live session host via Azure VM Run Command (`-RunLocalDiscovery`).
 

@@ -55,7 +55,6 @@ function formatValue(value) {
 	if (value === null || value === undefined || value === '') { return 'None'; }
 	if (typeof value === 'boolean') { return value ? 'Yes' : 'No'; }
 	if (typeof value === 'number') {
-		if (Math.abs(value) >= 1000) { return value.toLocaleString(); }
 		return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.00$/, '');
 	}
 	if (Array.isArray(value)) { return value.length ? value.map((item) => formatDisplayText(item)).join(', ') : 'None'; }
@@ -341,6 +340,10 @@ function objectEntriesRows(source) {
 	return Object.entries(source || {}).map(([key, value]) => ({ Setting: formatLabel(key), Value: value }));
 }
 
+function objectEntriesStatRows(source) {
+	return Object.entries(source || {}).map(([key, value]) => ({ label: formatLabel(key), value }));
+}
+
 function objectArrayColumns(rows, preferredKeys) {
 	const discovered = [];
 	rows.slice(0, 20).forEach((row) => {
@@ -355,9 +358,13 @@ function objectArrayColumns(rows, preferredKeys) {
 
 function createObjectTable(rows, preferredKeys) {
 	if (!rows.length) {
-		const empty = document.createElement('p');
-		empty.className = 'muted';
-		empty.textContent = 'No rows available.';
+		const empty = document.createElement('div');
+		empty.className = 'table-empty-state';
+		const title = document.createElement('strong');
+		title.textContent = 'No rows available';
+		const detail = document.createElement('span');
+		detail.textContent = 'This section does not contain any records.';
+		empty.append(title, detail);
 		return empty;
 	}
 	const table = document.createElement('table');
@@ -780,11 +787,24 @@ function createUserProfileExperienceSection() {
 	]);
 	appendHostTableBlock(section.body, 'Policy Locations', projectRows(normalizeCollection(defaultFileAssociations.PolicyLocations), ['RegistryPath', 'Source']), ['RegistryPath', 'Source']);
 	const languagePacks = data.LanguagePacks || {};
-	appendHostStatBlock(section.body, 'Language Packs', [
-		{ label: 'Query Succeeded', value: yesNoValue(languagePacks.CapabilityQuerySucceeded) },
+	const languagePackQuerySucceeded = toBooleanState(languagePacks.CapabilityQuerySucceeded);
+	const languagePackQueryError = formatValue(languagePacks.CapabilityQueryError);
+	const languagePackRows = [
+		{ label: 'Query Succeeded', value: yesNoValue(languagePackQuerySucceeded) },
 		{ label: 'System Locale', value: languagePacks.SystemLocale }
-	]);
-	appendHostTableBlock(section.body, 'Current User Languages', projectRows(normalizeCollection(languagePacks.CurrentUserLanguages), ['LanguageTag', 'Autonym', 'EnglishName']), ['LanguageTag', 'Autonym', 'EnglishName']);
+	];
+	if (!languagePackQuerySucceeded && languagePackQueryError !== 'None') {
+		languagePackRows.push({
+			label: 'Capability Error',
+			value: /elevation/i.test(languagePackQueryError)
+				? 'Detailed language pack inventory requires an elevated administrator session.'
+				: languagePackQueryError
+		});
+	}
+	appendHostStatBlock(section.body, 'Language Packs', languagePackRows);
+	if (languagePackQuerySucceeded) {
+		appendHostTableBlock(section.body, 'Current User Languages', projectRows(normalizeCollection(languagePacks.CurrentUserLanguages), ['LanguageTag', 'Autonym', 'EnglishName']), ['LanguageTag', 'Autonym', 'EnglishName']);
+	}
 	appendHostTableBlock(section.body, 'Loaded User Mapped Drive States', projectRows(normalizeCollection(upe.LoadedUserMappedDriveStates), ['AccountName', 'MappedDrivesPresent', 'MappedDriveCount']), ['AccountName', 'MappedDrivesPresent', 'MappedDriveCount']);
 	appendHostTableBlock(section.body, 'Loaded User Folder States', projectRows(normalizeCollection(upe.LoadedUserFolderStates), ['AccountName', 'ProfilePath', 'UserShellFoldersAvailable', 'LikelyOneDriveKnownFolderMove', 'LikelyFolderRedirection', 'RedirectedFolderCount']), ['AccountName', 'ProfilePath', 'UserShellFoldersAvailable', 'LikelyOneDriveKnownFolderMove', 'LikelyFolderRedirection', 'RedirectedFolderCount']);
 	return section.section;
@@ -852,7 +872,20 @@ function createAccessAndConnectivitySection() {
 	]);
 	appendHostTableBlock(section.body, 'AD Port Connections', normalizeCollection(adDeps.AdPortConnections), ['Name', 'Source', 'Target', 'Port', 'Protocol']);
 	if (avdConnectivity && Object.keys(avdConnectivity).length) {
-		appendHostStatBlock(section.body, 'AVD Connectivity', objectEntriesRows(avdConnectivity));
+		appendHostStatBlock(section.body, 'AVD Connectivity', [
+			{ label: 'All Required Reachable', value: yesNoValue(avdConnectivity.AllRequiredReachable) },
+			{ label: 'Required Endpoint Count', value: avdConnectivity.RequiredEndpointCount },
+			{ label: 'Required Reachable Count', value: avdConnectivity.RequiredReachableCount },
+			{ label: 'Required Unreachable Count', value: avdConnectivity.RequiredUnreachableCount },
+			{ label: 'Failed Endpoint Count', value: normalizeCollection(avdConnectivity.FailedEndpoints).length },
+			{ label: 'Successful Connectivity Result Count', value: normalizeCollection(avdConnectivity.Results).filter((row) => row && row.Connected).length }
+		]);
+		const failedEndpointsBlock = appendHostTableBlock(section.body, 'Failed Endpoints', normalizeCollection(avdConnectivity.FailedEndpoints), ['Hostname', 'Port', 'Category', 'Required', 'Connected', 'LatencyMs', 'Error']);
+		const failedEndpointsTable = failedEndpointsBlock.querySelector('table');
+		if (failedEndpointsTable) { failedEndpointsTable.classList.add('connectivity-table'); }
+		const successfulResultsBlock = appendHostTableBlock(section.body, 'Successful Connectivity Results', normalizeCollection(avdConnectivity.Results).filter((row) => row && row.Connected), ['Hostname', 'Port', 'Category', 'Required', 'Connected', 'LatencyMs', 'Error']);
+		const successfulResultsTable = successfulResultsBlock.querySelector('table');
+		if (successfulResultsTable) { successfulResultsTable.classList.add('connectivity-table'); }
 	}
 	appendHostStatBlock(section.body, 'RDP Shortpath', [
 		{ label: 'Shortpath in Use', value: yesNoValue(rdpShortpath.ShortpathUsedRecently || toBooleanState(rdpShortpath.ManagedNetworkShortpath && rdpShortpath.ManagedNetworkShortpath.Enabled) || toBooleanState(rdpShortpath.PublicNetworkShortpath && rdpShortpath.PublicNetworkShortpath.Enabled)) },
