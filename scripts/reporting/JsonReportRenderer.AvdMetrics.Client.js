@@ -40,6 +40,28 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			return clean.reduce((sum, value) => sum + value, 0) / clean.length;
 		}
 
+		function formatDisplayText(value) {
+			if (value === null || value === undefined || value === '') { return 'None'; }
+			const source = String(value);
+			const compact = source.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+			const directOverrides = {
+				azureadjoined: 'Entra ID Joined',
+				hybridazureadjoined: 'Hybrid Entra ID Joined',
+				activedirectoryjoined: 'Active Directory Joined',
+				workplacejoined: 'Workplace Joined'
+			};
+			if (directOverrides[compact]) { return directOverrides[compact]; }
+			const formatted = source
+				.replace(/[_-]+/g, ' ')
+				.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+				.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+				.split(/\s+/)
+				.filter(Boolean)
+				.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+				.join(' ');
+			return formatted.replace(/\bOne Drive\b/g, 'OneDrive').replace(/\bV Net\b/g, 'VNET');
+		}
+
 		function formatValue(value) {
 			if (value === null || value === undefined || value === '') { return 'None'; }
 			if (typeof value === 'boolean') { return value ? 'Yes' : 'No'; }
@@ -47,7 +69,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				if (Math.abs(value) >= 1000) { return value.toLocaleString(); }
 				return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.00$/, '');
 			}
-			if (Array.isArray(value)) { return value.length ? value.join(', ') : 'None'; }
+			if (Array.isArray(value)) { return value.length ? value.map((item) => formatValue(item)).join(', ') : 'None'; }
 			if (isPlainObject(value)) { return Object.keys(value).length + ' field(s)'; }
 			return String(value);
 		}
@@ -583,6 +605,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 		function createPoolPerformanceTrend(pool) {
 			const cpuSeries = parseDailyMetricSeries(pool && pool.CpuDailyBreakdown, 'AvgCpuPercent');
 			const memorySeries = parseDailyMetricSeries(pool && pool.MemoryDailyBreakdown, 'AvgMemUsedPercent');
+			const averageHostsOnPerDay = toNumber(pool && pool.AverageHostsOnPerDay);
 			if (!cpuSeries.length && !memorySeries.length) { return null; }
 
 			const daySet = new Set();
@@ -611,13 +634,22 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			card.className = 'pool-trend-card';
 			const head = document.createElement('div');
 			head.className = 'pool-trend-head';
+			const headText = document.createElement('div');
+			headText.className = 'pool-trend-head-text';
 			const title = document.createElement('h4');
 			title.className = 'pool-trend-title';
 			title.textContent = 'Daily CPU and Memory Trend';
 			const copy = document.createElement('p');
 			copy.className = 'pool-trend-copy';
 			copy.textContent = 'Daily average session-host utilisation across the scanned period.';
-			head.append(title, copy);
+			headText.append(title, copy);
+			head.append(headText);
+			if (averageHostsOnPerDay !== null) {
+				const hostBadge = document.createElement('span');
+				hostBadge.className = 'badge neutral pool-trend-badge';
+				hostBadge.textContent = 'Average Hosts/Day: ' + formatValue(averageHostsOnPerDay);
+				head.appendChild(hostBadge);
+			}
 
 			const legend = document.createElement('div');
 			legend.className = 'pool-trend-legend';
@@ -956,7 +988,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			const wrapper = document.createElement('div');
 			wrapper.className = className || 'chips';
 			items.forEach((item) => {
-				const fullValue = String(formatValue(item.value));
+				const fullValue = String(item.rawValue !== undefined ? item.rawValue : formatValue(item.value));
 				const displayValue = fullValue.length > 34 ? fullValue.slice(0, 31).trimEnd() + '...' : fullValue;
 				const chip = document.createElement('div');
 				chip.className = 'chip';
@@ -1131,6 +1163,18 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			}
 
 			details.appendChild(createDetailStack(sections));
+			return details;
+		}
+
+		function createPoolTagsDetails(pool) {
+			const tagEntries = isPlainObject(pool.Tags)
+				? Object.entries(pool.Tags).filter(([, value]) => value !== null && value !== undefined && value !== '')
+				: [];
+			if (!tagEntries.length) { return null; }
+			const details = document.createElement('details');
+			const summary = document.createElement('summary');
+			summary.textContent = 'Host Pool Tags • ' + tagEntries.length + (tagEntries.length === 1 ? ' item' : ' items');
+			details.append(summary, wrapTable(createObjectTable(tagEntries.map(([key, value]) => ({ Key: key, Value: value })), ['Key', 'Value'], { structuredDetailRows: false })));
 			return details;
 		}
 
@@ -1389,7 +1433,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				tr.dataset.search = searchText;
 				columns.forEach((column) => {
 					const td = document.createElement('td');
-					td.appendChild(createTableCellValue(column, row ? row[column] : null, row));
+					td.appendChild(createTableCellValue(column, row ? row[column] : null, row, tableOptions));
 					tr.appendChild(td);
 				});
 				tbody.appendChild(tr);
@@ -1654,38 +1698,75 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				const subtitle = document.createElement('p');
 				subtitle.textContent = (pool.FriendlyName && pool.Name && pool.FriendlyName !== pool.Name) ? pool.Name : '';
 				const poolHighlights = createChipList([
-					{ label: 'Location', value: pool.Location },
-					{ label: 'Subscription', value: pool.SubscriptionName },
-					{ label: 'Resource Group', value: pool.ResourceGroup }
+					{ label: 'Location', value: pool.Location, rawValue: pool.Location },
+					{ label: 'Subscription', value: pool.SubscriptionName, rawValue: pool.SubscriptionName },
+					{ label: 'Resource Group', value: pool.ResourceGroup, rawValue: pool.ResourceGroup }
 				], 'pool-highlights');
 				header.append(titleWrap, poolHighlights);
 				const poolMeta = createChipList([
-					{ label: 'Load Balancer', value: pool.LoadBalancerType },
 					{ label: 'Pool Type', value: pool.HostPoolType },
-					{ label: 'Max Sessions', value: formatFieldValue('MaxSessionLimit', pool.MaxSessionLimit) },
+					{ label: 'Load Balancer', value: pool.LoadBalancerType },
 					{ label: 'Domain Join', value: pool.DomainJoinType },
 					{ label: 'VM SKUs', value: pool.VmSkus },
-					{ label: 'Agent Versions', value: pool.AgentVersions }
+					{ label: 'Max Sessions', value: formatFieldValue('MaxSessionLimit', pool.MaxSessionLimit) },
+					{ label: 'Agent Versions', value: pool.AgentVersions },
+					{ label: 'Validation Environment', value: pool.ValidationEnvironment },
+					{ label: 'Reservation Match Status', value: pool.ReservationMatchStatus }
 				], 'pool-meta');
-				const featuredGrid = document.createElement('div');
-				featuredGrid.className = 'pool-grid featured';
-				const featuredCards = [
+				const performanceEnvelope = document.createElement('section');
+				performanceEnvelope.className = 'pool-summary-block performance-envelope';
+				const performanceEnvelopeTitle = document.createElement('h4');
+				performanceEnvelopeTitle.className = 'pool-summary-title';
+				performanceEnvelopeTitle.textContent = 'Performance Envelope';
+				const performanceCpuRow = document.createElement('div');
+				performanceCpuRow.className = 'performance-envelope-row';
+				const performanceCpuGrid = document.createElement('div');
+				performanceCpuGrid.className = 'pool-grid performance-envelope-grid';
+				[
 					createMetricCard('CPU Average', formatPercentValue(pool.AvgCpuPercent), 'Mean CPU usage across sampled hosts', 'accent-cpu'),
+					createMetricCard('CPU P95', formatPercentValue(pool.P95CpuPercent), '95th percentile CPU usage across sampled hosts', 'accent-cpu', 'P95CpuPercent', pool),
+					createMetricCard('CPU P99', formatPercentValue(pool.P99CpuPercent), '99th percentile CPU usage across sampled hosts', 'accent-cpu', 'P99CpuPercent', pool)
+				].forEach((card) => performanceCpuGrid.appendChild(card));
+				performanceCpuRow.append(performanceCpuGrid);
+				const performanceMemoryRow = document.createElement('div');
+				performanceMemoryRow.className = 'performance-envelope-row';
+				const performanceMemoryGrid = document.createElement('div');
+				performanceMemoryGrid.className = 'pool-grid performance-envelope-grid';
+				[
 					createMetricCard('Memory Average', formatPercentValue(pool.AvgMemUsedPercent), 'Mean memory usage across sampled hosts', 'accent-memory'),
-					createMetricCard('Authorised Users', pool.AuthorizedUserCount, 'Distinct authorised users resolved for this pool', 'accent-usage', 'AuthorizedUserCount', pool)
+					createMetricCard('Memory P95', formatPercentValue(pool.P95MemUsedPercent), '95th percentile memory usage across sampled hosts', 'accent-memory', 'P95MemUsedPercent', pool),
+					createMetricCard('Memory P99', formatPercentValue(pool.P99MemUsedPercent), '99th percentile memory usage across sampled hosts', 'accent-memory', 'P99MemUsedPercent', pool)
+				].forEach((card) => performanceMemoryGrid.appendChild(card));
+				performanceMemoryRow.append(performanceMemoryGrid);
+				performanceEnvelope.append(performanceEnvelopeTitle, performanceCpuRow, performanceMemoryRow);
+				const usageSummary = document.createElement('section');
+				usageSummary.className = 'pool-summary-block usage-summary';
+				const usageSummaryTitle = document.createElement('h4');
+				usageSummaryTitle.className = 'pool-summary-title';
+				usageSummaryTitle.textContent = 'Usage Summary';
+				const usageGrid = document.createElement('div');
+				usageGrid.className = 'pool-grid usage';
+				const usageCards = [
+					createMetricCard('Authorised Users', pool.AuthorizedUserCount, 'Distinct authorised users resolved for this pool', null, 'AuthorizedUserCount', pool)
 				];
 				if (!/^NoDiagnosticSettings$/i.test(pool.SessionsStatus || '')) {
-					featuredCards.push(createMetricCard('Peak User Count', /^NoUserActivity$/i.test(pool.SessionsStatus || '') ? 0 : pool.PeakConcurrentSessions, 'Highest concurrent sessions observed', 'accent-usage', 'PeakConcurrentSessions', pool));
+					usageCards.push(createMetricCard('Peak User Count', /^NoUserActivity$/i.test(pool.SessionsStatus || '') ? 0 : pool.PeakConcurrentSessions, 'Highest concurrent sessions observed', null, 'PeakConcurrentSessions', pool));
 				}
 				if (!/^NoDiagnosticSettings$/i.test(pool.MetricStatus || '')) {
-					featuredCards.push(createMetricCard('Daily Active Users', /^NoUserActivity$/i.test(pool.MetricStatus || '') ? 0 : pool.DailyAverageUsers, 'Average distinct users per sampled day', 'accent-usage', 'DailyAverageUsers', pool));
+					usageCards.push(createMetricCard('Daily Active Users', /^NoUserActivity$/i.test(pool.MetricStatus || '') ? 0 : pool.DailyAverageUsers, 'Average distinct users per sampled day', null, 'DailyAverageUsers', pool));
 				}
-				featuredCards.forEach((card) => featuredGrid.appendChild(card));
+				usageCards.forEach((card) => usageGrid.appendChild(card));
+				usageSummary.append(usageSummaryTitle, usageGrid);
 				const performanceTrend = createPoolPerformanceTrend(pool);
+				const hostSummary = document.createElement('section');
+				hostSummary.className = 'pool-summary-block host-summary';
+				const hostSummaryTitle = document.createElement('h4');
+				hostSummaryTitle.className = 'pool-summary-title';
+				hostSummaryTitle.textContent = 'Host Summary';
 				const divider = document.createElement('div');
 				divider.className = 'pool-divider';
 				const grid = document.createElement('div');
-				grid.className = 'pool-grid';
+				grid.className = 'pool-grid host-summary-grid';
 				[
 					createMetricCard('Host Count', pool.HostCount, 'Registered hosts in this pool'),
 					createMetricCard('Hosts Running', pool.HostsRunning, 'Session hosts currently powered on'),
@@ -1694,6 +1775,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 					createMetricCard('Hosts Unavailable', pool.HostsUnavailable, 'Hosts unavailable for broker placement'),
 					createMetricCard('Hosts Draining', pool.HostsDraining, 'Hosts set to stop taking new sessions')
 				].forEach((card) => grid.appendChild(card));
+				hostSummary.append(hostSummaryTitle, grid);
 				const details = document.createElement('div');
 				details.className = 'pool-details';
 				const createStaticPoolSection = (label, content, className) => {
@@ -1723,6 +1805,10 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				if (platformDetailSection) {
 					details.appendChild(platformDetailSection);
 				}
+				const tagsSection = createPoolTagsDetails(pool);
+				if (tagsSection) {
+					details.appendChild(tagsSection);
+				}
 				[
 					['Authorised Access', createPoolAccessDetails(pool)],
 					['User Activity', createPoolUsageDetails(pool)],
@@ -1744,11 +1830,11 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				if (subtitle.textContent) {
 					panel.append(subtitle);
 				}
-				panel.append(poolMeta, featuredGrid);
+				panel.append(poolMeta, usageSummary, performanceEnvelope, hostSummary);
 				if (performanceTrend) {
-					panel.appendChild(performanceTrend);
+					performanceEnvelope.appendChild(performanceTrend);
 				}
-				panel.append(divider, grid, details);
+				panel.append(divider, details);
 				stack.appendChild(panel);
 			});
 		}
