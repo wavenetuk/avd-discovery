@@ -1505,7 +1505,6 @@ function Get-HostPoolInfraInfo {
 			}
 			else {
 				$vmSizeMap      = @{}
-				$hostsRunning   = 0
 				$vmPriorities   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 				$vmSecurityTypes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 				$vmZones        = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1574,15 +1573,6 @@ function Get-HostPoolInfraInfo {
 					if ($vmResp -and $vmResp.StatusCode -eq 200) {
 						$vmData = $vmResp.Content | ConvertFrom-Json
 						$vmProp = $vmData.properties
-
-						# Power state from instanceView
-						if ($vmProp.PSObject.Properties['instanceView'] -and $vmProp.instanceView -and
-						    $vmProp.instanceView.PSObject.Properties['statuses']) {
-							$pwrStatus = @($vmProp.instanceView.statuses | Where-Object { $_.code -like 'PowerState/*' }) | Select-Object -First 1
-							if ($pwrStatus -and $pwrStatus.code -eq 'PowerState/running') {
-								$hostsRunning++
-							}
-						}
 
 						# VM priority (Regular / Spot)
 						$priority = if ($vmProp.PSObject.Properties['priority'] -and -not [string]::IsNullOrEmpty($vmProp.priority)) { $vmProp.priority } else { 'Regular' }
@@ -1908,7 +1898,7 @@ function Get-HostPoolInfraInfo {
 				}
 
 				$result.VmSizeMap       = $vmSizeMap
-				$result.HostsRunning    = $hostsRunning
+				$result.HostsRunning    = @($result.SessionHostDetails | Where-Object { $_.Status -and $_.Status -ne 'Shutdown' }).Count
 				$result.VmPriorities    = @($vmPriorities)
 				$result.VmSecurityTypes = @($vmSecurityTypes)
 				$result.AvailabilityZones = if ($vmZones.Count -gt 0) { @($vmZones | Sort-Object) } else { $null }
@@ -5422,12 +5412,8 @@ try {
 		$now       = [datetime]::UtcNow
 		$totalCurrentSessions = [int]($shDetails | Where-Object { $null -ne $_.Sessions } | Measure-Object -Property Sessions -Sum).Sum
 		$hostsAvailable   = @($shDetails | Where-Object { $_.Status -eq 'Available' }).Count
-		# Keep running/shutdown counts on the same VM power-state basis to avoid contradictory one-host snapshots.
-		$hostsShutdown    = if ($null -ne $infra.HostCount -and $null -ne $infra.HostsRunning) {
-			[Math]::Max(0, [int]$infra.HostCount - [int]$infra.HostsRunning)
-		} else {
-			@($shDetails | Where-Object { $_.Status -eq 'Shutdown' }).Count
-		}
+		# Keep running/shutdown counts on the same session-host status basis to avoid contradictory snapshots.
+		$hostsShutdown    = @($shDetails | Where-Object { $_.Status -eq 'Shutdown' }).Count
 		# Anything that is neither Available nor Shutdown (e.g. Unavailable, Disconnected, NeedsAssistance …)
 		$hostsUnavailable = @($shDetails | Where-Object { $_.Status -ne 'Available' -and $_.Status -ne 'Shutdown' }).Count
 		$hostsDraining    = @($shDetails | Where-Object { $_.AllowNewSession -eq $false }).Count
