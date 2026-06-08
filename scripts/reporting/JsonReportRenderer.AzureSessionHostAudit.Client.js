@@ -288,6 +288,61 @@ function yesNoValue(value) {
 	return state ? 'Yes' : 'No';
 }
 
+function formatWindowsLapsBackupDirectory(value) {
+	if (value === null || value === undefined || value === '') { return 'None'; }
+	const numeric = Number(value);
+	if (Number.isFinite(numeric)) {
+		if (numeric === 0) { return 'Disabled'; }
+		if (numeric === 1) { return 'Microsoft Entra ID only'; }
+		if (numeric === 2) { return 'Active Directory only'; }
+	}
+	return formatValue(value);
+}
+
+function formatWindowsLapsPasswordComplexity(value) {
+	const mappings = {
+		1: 'Large letters',
+		2: 'Large letters + small letters',
+		3: 'Large letters + small letters + numbers',
+		4: 'Large letters + small letters + numbers + specials',
+		5: 'Large letters + small letters + numbers + specials (improved readability)',
+		6: 'Passphrase (long words)',
+		7: 'Passphrase (short words)',
+		8: 'Passphrase (short words with unique prefixes)'
+	};
+	const numeric = Number(value);
+	if (Number.isFinite(numeric) && Object.prototype.hasOwnProperty.call(mappings, numeric)) {
+		return mappings[numeric];
+	}
+	return formatValue(value);
+}
+
+function formatWindowsLapsAutomaticAccountManagementTarget(value) {
+	const mappings = {
+		0: 'Built-in Administrator account',
+		1: 'New custom account'
+	};
+	const numeric = Number(value);
+	if (Number.isFinite(numeric) && Object.prototype.hasOwnProperty.call(mappings, numeric)) {
+		return mappings[numeric];
+	}
+	return formatValue(value);
+}
+
+function formatWindowsLapsPostAuthenticationActions(value) {
+	const mappings = {
+		1: 'Reset password',
+		3: 'Reset password and sign out',
+		5: 'Reset password and reboot',
+		11: 'Reset password and sign out'
+	};
+	const numeric = Number(value);
+	if (Number.isFinite(numeric) && Object.prototype.hasOwnProperty.call(mappings, numeric)) {
+		return mappings[numeric];
+	}
+	return formatValue(value);
+}
+
 function createHostSection(title) {
 	const section = document.createElement('section');
 	section.className = 'section host-report-section interactive-surface';
@@ -297,6 +352,34 @@ function createHostSection(title) {
 	body.className = 'host-report-section-body';
 	section.append(heading, body);
 	return { section, body };
+}
+
+function buildWindowsLapsPolicyRows(policy) {
+	if (!policy) { return []; }
+	const rows = [];
+	const addRow = (label, value, formatter) => {
+		if (value === null || value === undefined || value === '') { return; }
+		rows.push({ label, value: formatter ? formatter(value) : value });
+	};
+	addRow('Backup Directory', policy.BackupDirectory, formatWindowsLapsBackupDirectory);
+	addRow('Administrator Account Name', policy.AdministratorAccountName);
+	addRow('Password Age Days', policy.PasswordAgeDays);
+	addRow('Password Length', policy.PasswordLength);
+	addRow('Passphrase Length', policy.PassphraseLength);
+	addRow('Password Complexity', policy.PasswordComplexity, formatWindowsLapsPasswordComplexity);
+	addRow('Password Expiration Protection Enabled', policy.PasswordExpirationProtectionEnabled, yesNoValue);
+	addRow('AD Password Encryption Enabled', policy.ADPasswordEncryptionEnabled, yesNoValue);
+	addRow('AD Password Encryption Principal', policy.ADPasswordEncryptionPrincipal);
+	addRow('AD Encrypted Password History Size', policy.ADEncryptedPasswordHistorySize);
+	addRow('AD Backup DSRM Password', policy.ADBackupDSRMPassword, yesNoValue);
+	addRow('Post Authentication Reset Delay', policy.PostAuthenticationResetDelay);
+	addRow('Post Authentication Actions', policy.PostAuthenticationActions, formatWindowsLapsPostAuthenticationActions);
+	addRow('Automatic Account Management Enabled', policy.AutomaticAccountManagementEnabled, yesNoValue);
+	addRow('Automatic Account Management Target', policy.AutomaticAccountManagementTarget, formatWindowsLapsAutomaticAccountManagementTarget);
+	addRow('Automatic Account Management Name Or Prefix', policy.AutomaticAccountManagementNameOrPrefix);
+	addRow('Automatic Account Management Enable Account', policy.AutomaticAccountManagementEnableAccount, yesNoValue);
+	addRow('Automatic Account Management Randomize Name', policy.AutomaticAccountManagementRandomizeName, yesNoValue);
+	return rows;
 }
 
 function createHostBlock(title) {
@@ -312,15 +395,23 @@ function createHostBlock(title) {
 }
 
 function appendHostStatBlock(body, title, items) {
+	const renderableItems = (items || []).filter((item) => item && hasRenderableValue(item.value));
+	if (!renderableItems.length) {
+		return null;
+	}
 	const block = createHostBlock(title);
-	block.appendChild(createStatList(items));
+	block.appendChild(createStatList(renderableItems));
 	body.appendChild(block);
 	return block;
 }
 
 function appendHostTableBlock(body, title, rows, preferredKeys) {
+	const normalizedRows = rows || [];
+	if (!normalizedRows.length || !objectArrayColumns(normalizedRows, preferredKeys).length) {
+		return null;
+	}
 	const block = createHostBlock(title);
-	block.appendChild(wrapTable(createObjectTable(rows, preferredKeys)));
+	block.appendChild(wrapTable(createObjectTable(normalizedRows, preferredKeys)));
 	body.appendChild(block);
 	return block;
 }
@@ -354,6 +445,66 @@ function objectArrayColumns(rows, preferredKeys) {
 	const preferred = (preferredKeys || []).filter((key) => discovered.includes(key));
 	const remainder = discovered.filter((key) => !preferred.includes(key));
 	return preferred.concat(remainder).slice(0, 10);
+}
+
+function collectMappedDriveRows(userStates, currentSessionMappedDrives) {
+	const rows = [];
+	const rowsByDriveLetter = new Map();
+	const registerRow = (row) => {
+		rows.push(row);
+		const driveLetterKey = normalizeDriveLetterKey(row.DriveLetter);
+		if (!driveLetterKey) { return; }
+		if (!rowsByDriveLetter.has(driveLetterKey)) {
+			rowsByDriveLetter.set(driveLetterKey, []);
+		}
+		rowsByDriveLetter.get(driveLetterKey).push(row);
+	};
+	normalizeCollection(userStates).forEach((state) => {
+		const mappedDrives = normalizeCollection(state && state.MappedDrives);
+		mappedDrives.forEach((drive) => {
+			registerRow({
+				DriveLetter: drive.DriveLetter,
+				RemotePath: drive.RemotePath,
+				VolumeName: null,
+				FreeSpaceGB: null,
+				SizeGB: null,
+				AccountName: state.AccountName
+			});
+		});
+	});
+	normalizeCollection(currentSessionMappedDrives).forEach((drive) => {
+		const driveLetterKey = normalizeDriveLetterKey(drive.DriveLetter);
+		const candidates = rowsByDriveLetter.get(driveLetterKey) || [];
+		if (candidates.length === 1) {
+			const target = candidates[0];
+			if (target.VolumeName === null || target.VolumeName === undefined || target.VolumeName === '') {
+				target.VolumeName = drive.VolumeName;
+			}
+			if (target.FreeSpaceGB === null || target.FreeSpaceGB === undefined || target.FreeSpaceGB === '') {
+				target.FreeSpaceGB = drive.FreeSpaceGB;
+			}
+			if (target.SizeGB === null || target.SizeGB === undefined || target.SizeGB === '') {
+				target.SizeGB = drive.SizeGB;
+			}
+			return;
+		}
+		if (!candidates.length) {
+			registerRow({
+				DriveLetter: drive.DriveLetter,
+				RemotePath: null,
+				VolumeName: drive.VolumeName,
+				FreeSpaceGB: drive.FreeSpaceGB,
+				SizeGB: drive.SizeGB,
+				AccountName: null
+			});
+		}
+	});
+	return rows;
+}
+
+function normalizeDriveLetterKey(value) {
+	if (value === null || value === undefined || value === '') { return ''; }
+	return String(value).trim().replace(/:$/, '').toUpperCase();
 }
 
 function createObjectTable(rows, preferredKeys) {
@@ -541,7 +692,7 @@ function hostSummary() {
 	);
 	const heroCards = [
 		{ label: 'Applications', value: data.ApplicationCount || normalizeCollection(data.Applications).length, detail: 'Installed apps included in the export' },
-		{ label: 'FSLogix', value: fsLogixDiscovered ? 'Found' : 'Missing', detail: 'Profile container platform status' },
+		{ label: 'FSLogix', value: fsLogixDiscovered ? 'Detected' : 'Missing', detail: 'Profile container platform status' },
 		{ label: 'Join Type', value: joinType, detail: 'Detected device join state', variant: 'join-type' }
 	];
 	if (isActiveDirectoryJoined) {
@@ -694,8 +845,17 @@ function createSystemDetailsSection() {
 function createAntivirusSection() {
 	const antivirus = data.Antivirus || {};
 	const section = createHostSection('Antivirus');
+	const defenderForEndpoint = antivirus.DefenderForEndpoint || {};
+	appendHostStatBlock(section.body, 'Defender for Endpoint', [
+		{ label: 'Onboarded', value: defenderForEndpoint.Onboarded === true ? 'Yes' : 'No' },
+		{ label: 'Sense Service', value: defenderForEndpoint.SenseServiceStatus },
+		{ label: 'Org ID', value: defenderForEndpoint.OrgId }
+	]);
 	const securityCenterProducts = normalizeCollection(antivirus.InstalledApplicationMatches);
-	appendHostTableBlock(section.body, 'Security Center Products', projectRows(securityCenterProducts, ['Publisher', 'Version']), ['Publisher', 'Version']);
+	const securityCenterRows = projectRows(securityCenterProducts, ['Publisher', 'Version']);
+	if (securityCenterRows.length) {
+		appendHostTableBlock(section.body, 'Security Center Products', securityCenterRows, ['Publisher', 'Version']);
+	}
 	return section.section;
 }
 
@@ -704,16 +864,21 @@ function createLapsSection() {
 	const section = createHostSection('LAPS');
 	const inUse = toBooleanState(laps.InUse);
 	const typeLabel = laps.WindowsLapsConfigured ? 'Windows LAPS' : (laps.LegacyLapsConfigured ? 'Legacy LAPS' : 'Not in use');
-	appendHostStatBlock(section.body, 'In Use', [
+	appendHostStatBlock(section.body, '', [
 		{ label: 'In Use', value: inUse ? typeLabel : 'No' }
 	]);
-	if (inUse && laps.WindowsLapsPolicy) {
-		appendHostStatBlock(section.body, 'Windows LAPS Policy', [
-			{ label: 'Administrator Account Name', value: laps.WindowsLapsPolicy.AdministratorAccountName },
-			{ label: 'Password Age Days', value: laps.WindowsLapsPolicy.PasswordAgeDays },
-			{ label: 'Password Length', value: laps.WindowsLapsPolicy.PasswordLength },
-			{ label: 'Password Complexity', value: yesNoValue(toBooleanState(laps.WindowsLapsPolicy.PasswordComplexity)) }
-		]);
+	if (inUse) {
+		const policyBlocks = [
+			['Windows LAPS Policy (HKLM\\SOFTWARE\\Microsoft\\Policies\\LAPS)', laps.WindowsLapsPolicy],
+			['Windows LAPS Group Policy (HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\LAPS)', laps.WindowsLapsGroupPolicy],
+			['Windows LAPS Policy Manager (HKLM\\SOFTWARE\\Microsoft\\PolicyManager\\current\\device\\LAPS)', laps.WindowsLapsPolicyManager]
+		];
+		policyBlocks.forEach(([title, policy]) => {
+			const rows = buildWindowsLapsPolicyRows(policy);
+			if (rows.length) {
+				appendHostStatBlock(section.body, title, rows);
+			}
+		});
 	}
 	return section.section;
 }
@@ -731,24 +896,39 @@ function createTimeSourceSection() {
 function createFsLogixSection() {
 	const fs = data.FSLogix || {};
 	const section = createHostSection('FSLogix');
+	const profileInventory = normalizeCollection(fs.ProfileLocationInventory);
+	const accessibleProfileLocations = profileInventory.filter((location) => location && location.Accessible !== false && !location.ScanError);
+	const profileInventoryIsPartial = profileInventory.length > 0 && accessibleProfileLocations.length < profileInventory.length;
+	const profileInventoryUsesAzureFiles = profileInventory.some((location) => location && location.UsageSource === 'Azure Files share stats');
+	const profileInventoryDetail = profileInventoryUsesAzureFiles
+		? 'Known total from Azure Files share usage stats'
+		: (profileInventoryIsPartial
+			? 'Known total from accessible profile containers only'
+			: 'Total profile container size (Detailed FSLogix inventory requires an elevated administrator session)');
 	const glyphs = document.createElement('div');
 	glyphs.className = 'fslogix-glyph-grid';
 	glyphs.append(
 		createSummaryCard('Profile Container Count', fs.ProfileContainerCount == null ? 'n/a' : fs.ProfileContainerCount, 'Detected profile containers'),
-		createSummaryCard('Profile Count Total GB', fs.ProfileContainerTotalGB == null ? 'n/a' : fs.ProfileContainerTotalGB, 'Total profile container size')
+		createSummaryCard('Profile Count Total GB', fs.ProfileContainerTotalGB == null ? 'n/a' : fs.ProfileContainerTotalGB, profileInventoryDetail)
 	);
 	section.body.appendChild(glyphs);
 	appendHostStatBlock(section.body, 'Configuration and Components', [
 		{ label: 'Installed', value: yesNoValue(fs.Installed) },
 		{ label: 'Config Detected', value: yesNoValue(fs.ConfigDetected) },
+		{ label: 'Profile Root Locations', value: fs.ProfileLocations },
+		{ label: 'Inventory Coverage', value: profileInventory.length ? accessibleProfileLocations.length + '/' + profileInventory.length + ' locations accessible' : 'No profile locations configured' },
+		{ label: 'Profile Total Source', value: fs.ProfileContainerTotalSource || 'Filesystem walk' },
 		{ label: 'Cloud Cache in Use', value: yesNoValue(fs.CloudCacheInUse) }
 	]);
 	const appMasking = fs.AppMasking || {};
 	appendHostStatBlock(section.body, 'App Masking', [
-		{ label: 'Configured', value: yesNoValue(appMasking.Configured) },
-		{ label: 'Rule File Count', value: normalizeCollection(appMasking.RuleDirectories).length }
+		{ label: 'Configured', value: yesNoValue(appMasking.RulesInUse) },
+		{ label: 'Rule File Count', value: appMasking.RuleFileCount || 0 }
 	]);
-	appendHostTableBlock(section.body, 'Rule Directories', projectRows(normalizeCollection(appMasking.RuleDirectories), ['Path', 'TypeHint', 'Exists', 'IsDirectory', 'IsFile', 'SizeGB', 'LastWriteTime']), ['Path', 'TypeHint', 'Exists', 'IsDirectory', 'IsFile', 'SizeGB', 'LastWriteTime']);
+	appendHostTableBlock(section.body, 'Rule Directories Searched', projectRows(normalizeCollection(appMasking.RuleDirectories), ['Path', 'TypeHint', 'Exists', 'IsDirectory', 'IsFile', 'SizeGB', 'LastWriteTime']), ['Path', 'TypeHint', 'Exists', 'IsDirectory', 'IsFile', 'SizeGB', 'LastWriteTime']);
+	if (normalizeCollection(appMasking.RuleFiles).length) {
+		appendHostTableBlock(section.body, 'Rule Files', projectRows(normalizeCollection(appMasking.RuleFiles), ['Name', 'FullName', 'Extension', 'SizeBytes', 'LastWriteTime']), ['Name', 'FullName', 'Extension', 'SizeBytes', 'LastWriteTime']);
+	}
 	appendHostTableBlock(section.body, 'Redirections', projectRows(normalizeCollection(fs.RedirectionsXml), ['ComponentName', 'Configured', 'RedirectionsXmlInUse', 'SourceFolders', 'RedirectionsXmlFiles']), ['ComponentName', 'Configured', 'RedirectionsXmlInUse', 'SourceFolders', 'RedirectionsXmlFiles']);
 	return section.section;
 }
@@ -763,6 +943,10 @@ function createUserProfileExperienceSection() {
 		{ label: 'Mapped Drives', value: yesNoValue((upe.UsersWithMappedDrives || 0) > 0) },
 		{ label: 'Current Session Mapped Drives', value: yesNoValue((upe.CurrentSessionMappedDriveCount || 0) > 0) }
 	]);
+	const mappedDriveRows = collectMappedDriveRows(upe.LoadedUserMappedDriveStates, upe.CurrentSessionMappedDrives);
+	if (mappedDriveRows.length) {
+		appendHostTableBlock(section.body, 'Mapped Drives', projectRows(mappedDriveRows, ['DriveLetter', 'RemotePath', 'VolumeName', 'FreeSpaceGB', 'SizeGB', 'AccountName']), ['DriveLetter', 'RemotePath', 'VolumeName', 'FreeSpaceGB', 'SizeGB', 'AccountName']);
+	}
 	const policies = upe.OneDrivePolicies || {};
 	appendHostStatBlock(section.body, 'OneDrive Policies', [
 		{ label: 'Policy Detected', value: yesNoValue(policies.PolicyDetected) },
@@ -822,8 +1006,6 @@ function createOfficeDetailsSection() {
 		appendHostTableBlock(section.body, 'User Settings', projectRows(normalizeCollection(office.UserSettings), ['Setting', 'Value', 'Source']), ['Setting', 'Value', 'Source']);
 	}
 	appendHostStatBlock(section.body, 'Teams Media Optimisations', [
-		{ label: 'Classic Teams Optimisations', value: yesNoValue(teams.OptimizationReadyClassicTeams) },
-		{ label: 'New Teams Optimisations', value: yesNoValue(teams.OptimizationReadyNewTeams) },
 		{ label: 'Web RTC Redirector Installed', value: yesNoValue(teams.WebRtcRedirectorInstalled) },
 		{ label: 'AVD Environment Flag Set', value: yesNoValue(teams.IsWvdEnvironmentFlagSet) }
 	]);
