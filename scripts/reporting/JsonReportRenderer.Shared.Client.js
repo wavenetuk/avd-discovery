@@ -391,9 +391,29 @@ function getHostPoolNavigationChildren(section) {
 		});
 }
 
+function getStorageAccountNavigationChildren(section) {
+	if (!section || section.classList.contains('hidden')) { return []; }
+	return Array.from(section.querySelectorAll('#storage-account-stack > .pool-panel'))
+		.filter((node) => !node.classList.contains('hidden'))
+		.map((node, childIndex) => {
+			const heading = node.querySelector('.pool-header h3, h3');
+			const label = heading && heading.textContent && heading.textContent.trim()
+				? heading.textContent.trim()
+				: 'Storage Account ' + (childIndex + 1);
+			return createNavigationEntry(
+				ensureSectionAnchor(node, 'report-storage-account-' + slugifyNavLabel(label || childIndex)),
+				label,
+				node
+			);
+		});
+}
+
 function getSectionNavigationEntries(section, index) {
 	if (!section || section.classList.contains('hidden')) { return []; }
 	if (section.id === 'host-pool-section') {
+		return [];
+	}
+	if (section.id === 'storage-account-section') {
 		return [];
 	}
 	if (section.id === 'data-sections') {
@@ -461,6 +481,15 @@ function buildReportNavigation() {
 		const hostPoolEntry = sections.find((entry) => entry.id === 'primary-table-section' || entry.label === 'Host Pools');
 		if (hostPoolEntry) {
 			hostPoolEntry.children = hostPoolChildren;
+		}
+	}
+
+	const storageAccountSection = document.getElementById('storage-account-section');
+	const storageAccountChildren = getStorageAccountNavigationChildren(storageAccountSection);
+	if (storageAccountChildren.length) {
+		const storageAccountEntry = sections.find((entry) => entry.id === 'secondary-table-section' || entry.label === 'Storage Accounts');
+		if (storageAccountEntry) {
+			storageAccountEntry.children = storageAccountChildren;
 		}
 	}
 

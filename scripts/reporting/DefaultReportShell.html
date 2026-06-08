@@ -1406,6 +1406,8 @@
 			gap: 12px;
 		}
 		#licensing-wrap .content-sheet-body {
+			display: grid;
+			gap: 12px;
 			padding-top: 16px;
 		}
 		.licensing-alert {
@@ -1884,6 +1886,9 @@
 			gap: 8px;
 		}
 		.performance-envelope-grid {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+		.storage-summary-grid {
 			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
 		.pool-summary-block {
@@ -2832,6 +2837,11 @@
 			<h2 id="secondary-table-title"></h2>
 			<p id="secondary-table-copy"></p>
 			<div class="table-wrap" id="secondary-table-wrap"></div>
+		</section>
+		<section class="section hidden" id="storage-account-section">
+			<h2>Storage Account Detail</h2>
+			<p>Operational, network, and file-share groupings for each storage account in this export.</p>
+			<div class="pool-stack" id="storage-account-stack"></div>
 		</section>
 		<section class="section hidden" id="licensing-section">
 			<h2>Licensing</h2>

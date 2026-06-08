@@ -1604,9 +1604,12 @@ function Get-StorageAccountByName {
 
 function Get-FSLogixAzureFilesLocationInfo {
 	param(
-		[Parameter(Mandatory = $true)]
 		[string[]]$ProfileLocations
 	)
+
+	if ($null -eq $ProfileLocations -or @($ProfileLocations).Count -eq 0) {
+		return @()
+	}
 
 	$results = foreach ($location in @($ProfileLocations)) {
 		$normalizedLocation = Get-NormalizedText -Value $location
@@ -1658,9 +1661,23 @@ function Get-StorageAccountShareUsageMap {
 
 function Get-FSLogixAzureFilesShareUsage {
 	param(
-		[Parameter(Mandatory = $true)]
 		[string[]]$ProfileLocations
 	)
+
+	if ($null -eq $ProfileLocations -or @($ProfileLocations).Count -eq 0) {
+		return [PSCustomObject]@{
+			Prompted = $false
+			Enabled = $false
+			Authenticated = $false
+			DetectedLocationCount = 0
+			ResolvedLocationCount = 0
+			LocationUsage = @{}
+			TotalUsedBytes = $null
+			TotalUsedGB = $null
+			UsageSource = 'FilesystemWalk'
+			SkippedReason = 'No Azure Files profile locations detected'
+		}
+	}
 
 	$azureLocationInfo = @(Get-FSLogixAzureFilesLocationInfo -ProfileLocations $ProfileLocations)
 	if (-not $azureLocationInfo.Count) {
