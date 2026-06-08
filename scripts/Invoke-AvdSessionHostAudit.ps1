@@ -180,6 +180,30 @@ function Get-OptionalPropertyValue {
 	return $property.Value
 }
 
+function Get-DefenderForEndpointOnboardingDiscovery {
+	$statusPath = 'HKLM:\SOFTWARE\Microsoft\Windows Advanced Threat Protection\Status'
+	$status = Get-RegistryKeyValues -Path $statusPath
+	$senseService = Get-Service -Name 'Sense' -ErrorAction SilentlyContinue
+	$onboardingStateValue = Get-OptionalPropertyValue -Object $status -PropertyName 'OnboardingState'
+	$orgId = Get-OptionalPropertyValue -Object $status -PropertyName 'OrgId'
+	$onboarded = $null
+	if ($null -ne $onboardingStateValue) {
+		$onboarded = [int]$onboardingStateValue -eq 1
+	}
+
+	[PSCustomObject]@{
+		Detected             = ($null -ne $status) -or ($null -ne $senseService) -or ($null -ne $onboardingStateValue) -or (-not [string]::IsNullOrWhiteSpace($orgId))
+		Onboarded            = $onboarded
+		OnboardingState      = if ($null -eq $onboarded) { 'Unknown' } elseif ($onboarded) { 'Onboarded' } else { 'Not Onboarded' }
+		OnboardingStateValue = $onboardingStateValue
+		OrgId                = $orgId
+		SenseServiceInstalled = $null -ne $senseService
+		SenseServiceStatus   = if ($null -ne $senseService) { [string]$senseService.Status } else { 'NotInstalled' }
+		SenseServiceStartType = if ($null -ne $senseService) { [string]$senseService.StartType } else { $null }
+		RegistryPath         = $statusPath
+	}
+}
+
 function Get-NormalizedText {
 	param(
 		[Parameter(Mandatory = $false)]
@@ -717,15 +741,18 @@ function Get-IntuneEnrollmentDiscovery {
 
 function Get-LapsDiscovery {
 	$windowsLapsPolicy = Get-RegistryKeyValues -Path 'HKLM:\SOFTWARE\Microsoft\Policies\LAPS'
+	$windowsLapsGroupPolicy = Get-RegistryKeyValues -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\LAPS'
 	$windowsLapsPolicyManager = Get-RegistryKeyValues -Path 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\LAPS'
 	$legacyLapsPolicy = Get-RegistryKeyValues -Path 'HKLM:\SOFTWARE\Policies\Microsoft Services\AdmPwd'
 	$legacyLapsDllPath = 'C:\Program Files\LAPS\CSE\AdmPwd.dll'
 
-	$windowsLapsConfigured = $null -ne $windowsLapsPolicy -or $null -ne $windowsLapsPolicyManager
+	$windowsLapsConfigured = $null -ne $windowsLapsPolicy -or $null -ne $windowsLapsGroupPolicy -or $null -ne $windowsLapsPolicyManager
 	$legacyLapsConfigured = $null -ne $legacyLapsPolicy -or (Test-Path -Path $legacyLapsDllPath)
 	$legacyEnabled = if ($null -eq $legacyLapsPolicy) { $false } else { [int](Get-OptionalPropertyValue -Object $legacyLapsPolicy -PropertyName 'AdmPwdEnabled') -eq 1 }
 	$windowsBackupDirectory = if ($null -ne $windowsLapsPolicy) {
 		Get-OptionalPropertyValue -Object $windowsLapsPolicy -PropertyName 'BackupDirectory'
+	} elseif ($null -ne $windowsLapsGroupPolicy) {
+		Get-OptionalPropertyValue -Object $windowsLapsGroupPolicy -PropertyName 'BackupDirectory'
 	} elseif ($null -ne $windowsLapsPolicyManager) {
 		Get-OptionalPropertyValue -Object $windowsLapsPolicyManager -PropertyName 'BackupDirectory'
 	} else { $null }
@@ -737,6 +764,7 @@ function Get-LapsDiscovery {
 		BackupDirectory          = $windowsBackupDirectory
 		LegacyLapsDllPresent     = Test-Path -Path $legacyLapsDllPath
 		WindowsLapsPolicy        = $windowsLapsPolicy
+		WindowsLapsGroupPolicy   = $windowsLapsGroupPolicy
 		WindowsLapsPolicyManager = $windowsLapsPolicyManager
 		LegacyLapsPolicy         = $legacyLapsPolicy
 	}
@@ -917,20 +945,14 @@ function Get-FSLogixAppMaskingDiscovery {
 				}
 			}
 	}
-
-	# HKLM:\SOFTWARE\FSLogix\Apps is written by the installer with InstallPath/InstallVersion.
-	# Those keys are not App Masking configuration - exclude them when deciding if App Masking
-	# has been deliberately configured.
-	$installerOnlyKeys = @('InstallPath', 'InstallVersion')
-	$localConfigHasMaskingSettings = $null -ne $localConfig -and
-		@($localConfig.PSObject.Properties | Where-Object { $_.Name -notin $installerOnlyKeys }).Count -gt 0
+	$rulesInUse = @($ruleFiles).Count -gt 0
 
 	[PSCustomObject]@{
-		Configured         = $localConfigHasMaskingSettings -or ($null -ne $policyConfig)
+		Configured         = $rulesInUse
 		EffectiveEnabled   = if ($null -eq $effectiveConfig) { $null } else { Get-OptionalPropertyValue -Object $effectiveConfig -PropertyName 'Enabled' }
 		RuleDirectories    = @($ruleDirectories | ForEach-Object { Get-PathInventoryItem -Path $_ -TypeHint 'Directory' })
 		RuleFileCount      = @($ruleFiles).Count
-		RulesInUse         = @($ruleFiles).Count -gt 0
+		RulesInUse         = $rulesInUse
 		RawLocalConfig     = $localConfig
 		RawPolicyConfig    = $policyConfig
 		RuleFiles          = @($ruleFiles)
@@ -944,6 +966,7 @@ function Get-AntivirusDiscovery {
 		[object[]]$InstalledApplications
 	)
 
+	$defenderForEndpoint = Get-DefenderForEndpointOnboardingDiscovery
 	$securityCenterProducts = @()
 	try {
 		$securityCenterProducts = @(Get-CimInstance -Namespace 'root/SecurityCenter2' -ClassName 'AntivirusProduct' -ErrorAction Stop | ForEach-Object {
@@ -988,12 +1011,28 @@ function Get-AntivirusDiscovery {
 		}
 	})
 
+	if (@($securityCenterProducts).Count -eq 0 -and $null -ne $defenderStatus -and @($applicationMatches).Count -eq 0) {
+		$defenderState = if ($defenderStatus.AntivirusEnabled -eq $true) {
+			'Enabled'
+		} elseif ($defenderStatus.AntivirusEnabled -eq $false) {
+			'Disabled'
+		} else {
+			'Unknown'
+		}
+		$applicationMatches = @([PSCustomObject]@{
+			Name      = 'Microsoft Defender Antivirus'
+			Publisher = 'Microsoft Defender Antivirus'
+			Version   = $defenderState
+		})
+	}
+
 	[PSCustomObject]@{
-		SecurityCenterProducts     = @($securityCenterProducts)
-		SecurityCenterDetected     = @($securityCenterProducts).Count -gt 0
-		WindowsDefender            = $defenderStatus
-		InstalledApplicationMatches = $applicationMatches
-		Detected                   = @($securityCenterProducts).Count -gt 0 -or $null -ne $defenderStatus -or @($applicationMatches).Count -gt 0
+		DefenderForEndpoint         = $defenderForEndpoint
+		SecurityCenterProducts      = @($securityCenterProducts)
+		SecurityCenterDetected      = @($securityCenterProducts).Count -gt 0 -or $null -ne $defenderStatus -or $defenderForEndpoint.Detected
+		WindowsDefender             = $defenderStatus
+		InstalledApplicationMatches  = $applicationMatches
+		Detected                    = @($securityCenterProducts).Count -gt 0 -or $null -ne $defenderStatus -or @($applicationMatches).Count -gt 0 -or $defenderForEndpoint.Detected
 	}
 }
 
@@ -1423,6 +1462,350 @@ function Get-FSLogixProfileFiles {
 	return @($results)
 }
 
+function Test-InteractivePromptAvailable {
+	return [Environment]::UserInteractive
+}
+
+function Read-YesNoPrompt {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Prompt,
+
+		[Parameter(Mandatory = $false)]
+		[bool]$Default = $false
+	)
+
+	if (-not (Test-InteractivePromptAvailable)) {
+		return $Default
+	}
+
+	$suffix = if ($Default) { '[Y/n]' } else { '[y/N]' }
+	while ($true) {
+		$response = Get-NormalizedText -Value (Read-Host "$Prompt $suffix")
+		if ([string]::IsNullOrWhiteSpace($response)) {
+			return $Default
+		}
+
+		switch ($response.ToLowerInvariant()) {
+			'y' { return $true }
+			'yes' { return $true }
+			'n' { return $false }
+			'no' { return $false }
+			default {
+				Write-Host '  Please answer yes or no.' -ForegroundColor DarkGray
+			}
+		}
+	}
+}
+
+function Ensure-AzAccountsModuleAvailable {
+	if (Get-Module -ListAvailable -Name 'Az.Accounts') {
+		Import-Module -Name 'Az.Accounts' -Force -ErrorAction Stop
+		return $true
+	}
+
+	if (-not (Read-YesNoPrompt -Prompt 'Az.Accounts is not installed. Install it now so FSLogix share usage stats can be collected?' -Default:$false)) {
+		return $false
+	}
+
+	try {
+		Write-Host ''
+		Write-Host '  Attempting to install Az.Accounts for the current user...' -ForegroundColor Cyan
+		Install-Module -Name 'Az.Accounts' -Scope CurrentUser -Force -AllowClobber -Repository 'PSGallery' -ErrorAction Stop | Out-Null
+		Import-Module -Name 'Az.Accounts' -Force -ErrorAction Stop
+		return $true
+	}
+	catch {
+		Write-Host ''
+		Write-Host '  Az.Accounts could not be installed in this session.' -ForegroundColor DarkYellow
+		Write-Host '  Run this command in the same PowerShell session, then rerun the audit:' -ForegroundColor Cyan
+		Write-Host '  Install-Module -Name Az.Accounts -Scope CurrentUser -Force -AllowClobber -Repository PSGallery' -ForegroundColor DarkGray
+		Write-Host '  If you are prompted to trust the repository, answer yes.' -ForegroundColor DarkGray
+		Write-Host '  Azure Files share usage stats will be skipped for this run.' -ForegroundColor DarkYellow
+		return $false
+	}
+}
+
+function Connect-RequestedAzAccount {
+	param(
+		[Parameter(Mandatory = $false)]
+		$CurrentContext
+	)
+
+	Write-Host ''
+	if ($CurrentContext -and $CurrentContext.Account -and -not [string]::IsNullOrWhiteSpace([string]$CurrentContext.Account.Id)) {
+		Write-Host "  Current Azure context: $($CurrentContext.Account.Id)" -ForegroundColor DarkGray
+	}
+	Write-Host '  Sign in to the Azure account to use for detailed FSLogix share usage stats.' -ForegroundColor Cyan
+	Write-Host '  Use the Azure sign-in window that opens next.' -ForegroundColor DarkGray
+	Write-Host ''
+
+	Connect-AzAccount -ErrorAction Stop | Out-Null
+
+	$connectedContext = Get-AzContext
+	if (-not $connectedContext -or -not $connectedContext.Account) {
+		throw 'Azure authentication completed without an active context.'
+	}
+
+	Write-Host "  Signed in as: $($connectedContext.Account.Id)" -ForegroundColor DarkGray
+	Write-Host ''
+
+	return $connectedContext
+}
+
+function Invoke-ArmRequest {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Path,
+
+		[string]$Method = 'GET',
+
+		[Parameter(Mandatory = $false)]
+		[string]$Payload
+	)
+
+	$callParams = @{ Path = $Path; Method = $Method; ErrorAction = $ErrorActionPreference }
+	if ($PSBoundParameters.ContainsKey('Payload')) { $callParams['Payload'] = $Payload }
+	Invoke-AzRestMethod @callParams
+}
+
+function Get-StorageAccountByName {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string[]]$Names,
+
+		[Parameter(Mandatory = $true)]
+		[object[]]$Subscriptions
+	)
+
+	$found = [System.Collections.Generic.List[PSCustomObject]]::new()
+	$nameSet = [System.Collections.Generic.HashSet[string]]::new($Names, [System.StringComparer]::OrdinalIgnoreCase)
+
+	foreach ($sub in $Subscriptions) {
+		Set-AzContext -SubscriptionId $sub.Id -WarningAction SilentlyContinue | Out-Null
+		$resp = Invoke-ArmRequest -Path "/subscriptions/$($sub.Id)/providers/Microsoft.Storage/storageAccounts?api-version=2023-01-01" -Method GET -ErrorAction SilentlyContinue
+		if (-not $resp -or $resp.StatusCode -ne 200) { continue }
+
+		foreach ($sa in @(($resp.Content | ConvertFrom-Json).value)) {
+			if (-not $nameSet.Contains($sa.name)) { continue }
+			$rgParts = $sa.id -split '/'
+			$rgIdx   = [Array]::IndexOf($rgParts, 'resourceGroups')
+			$rg      = if ($rgIdx -ge 0) { $rgParts[$rgIdx + 1] } else { $null }
+			$found.Add([PSCustomObject]@{
+				SubscriptionId   = $sub.Id
+				SubscriptionName = $sub.Name
+				ResourceGroup    = $rg
+				Resource         = $sa
+			})
+		}
+	}
+	return $found.ToArray()
+}
+
+function Get-FSLogixAzureFilesLocationInfo {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string[]]$ProfileLocations
+	)
+
+	$results = foreach ($location in @($ProfileLocations)) {
+		$normalizedLocation = Get-NormalizedText -Value $location
+		if ([string]::IsNullOrWhiteSpace($normalizedLocation)) { continue }
+		if ($normalizedLocation -notmatch '^(?<prefix>\\\\)(?<account>[A-Za-z0-9-]+)\.file\.core\.windows\.net\\(?<share>[^\\/]+)') { continue }
+
+		[PSCustomObject]@{
+			Location           = $normalizedLocation
+			StorageAccountName = $matches.account
+			ShareName          = $matches.share
+		}
+	}
+
+	return @($results)
+}
+
+function Get-StorageAccountShareUsageMap {
+	param(
+		[Parameter(Mandatory = $true)]
+		[PSCustomObject]$StorageAccount
+	)
+
+	$sa = $StorageAccount.Resource
+	$subId = $StorageAccount.SubscriptionId
+	$rg = $StorageAccount.ResourceGroup
+	$name = $sa.name
+
+	$shareUsageMap = @{}
+	$sharesResp = Invoke-ArmRequest -Path "/subscriptions/$subId/resourceGroups/$rg/providers/Microsoft.Storage/storageAccounts/$name/fileServices/default/shares?api-version=2023-01-01&`$expand=stats" -Method GET -ErrorAction SilentlyContinue
+	if (-not $sharesResp -or $sharesResp.StatusCode -ne 200) {
+		$sharesResp = Invoke-ArmRequest -Path "/subscriptions/$subId/resourceGroups/$rg/providers/Microsoft.Storage/storageAccounts/$name/fileServices/default/shares?api-version=2023-01-01" -Method GET -ErrorAction SilentlyContinue
+	}
+
+	if ($sharesResp -and $sharesResp.StatusCode -eq 200) {
+		foreach ($share in @(($sharesResp.Content | ConvertFrom-Json).value)) {
+			$shareProperties = $share.properties
+			$usedBytes = if ($shareProperties.PSObject.Properties['shareUsageBytes']) { [int64]$shareProperties.shareUsageBytes } else { $null }
+			$shareUsageMap[[string]$share.name.ToLowerInvariant()] = [PSCustomObject]@{
+				ShareName = $share.name
+				UsedBytes = $usedBytes
+				UsedGB = if ($null -ne $usedBytes) { [Math]::Round($usedBytes / 1GB, 2) } else { $null }
+				UsageStatsAvailable = $true
+			}
+		}
+	}
+
+	return $shareUsageMap
+}
+
+function Get-FSLogixAzureFilesShareUsage {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string[]]$ProfileLocations
+	)
+
+	$azureLocationInfo = @(Get-FSLogixAzureFilesLocationInfo -ProfileLocations $ProfileLocations)
+	if (-not $azureLocationInfo.Count) {
+		return [PSCustomObject]@{
+			Prompted = $false
+			Enabled = $false
+			Authenticated = $false
+			DetectedLocationCount = 0
+			ResolvedLocationCount = 0
+			LocationUsage = @{}
+			TotalUsedBytes = $null
+			TotalUsedGB = $null
+			UsageSource = 'FilesystemWalk'
+			SkippedReason = 'No Azure Files profile locations detected'
+		}
+	}
+
+	if (-not (Read-YesNoPrompt -Prompt 'FSLogix profile storage appears to use Azure Files. Sign in to Azure and collect detailed share usage stats?' -Default:$false)) {
+		return [PSCustomObject]@{
+			Prompted = $true
+			Enabled = $false
+			Authenticated = $false
+			DetectedLocationCount = $azureLocationInfo.Count
+			ResolvedLocationCount = 0
+			LocationUsage = @{}
+			TotalUsedBytes = $null
+			TotalUsedGB = $null
+			UsageSource = 'FilesystemWalk'
+			SkippedReason = 'Azure Files share usage scan was declined by the user'
+		}
+	}
+
+	$originalContext = $null
+	$authenticatedContext = $null
+	$locationUsage = @{}
+	try {
+		if (-not (Ensure-AzAccountsModuleAvailable)) {
+			return [PSCustomObject]@{
+				Prompted = $true
+				Enabled = $false
+				Authenticated = $false
+				DetectedLocationCount = $azureLocationInfo.Count
+				ResolvedLocationCount = 0
+				LocationUsage = @{}
+				TotalUsedBytes = $null
+				TotalUsedGB = $null
+				UsageSource = 'FilesystemWalk'
+				SkippedReason = 'Az.Accounts could not be installed in this session; install it manually and rerun the audit'
+			}
+		}
+
+		try {
+			Disable-AzContextAutosave -Scope Process | Out-Null
+		}
+		catch {
+		}
+
+		$originalContext = Get-AzContext -ErrorAction SilentlyContinue
+		if (-not $originalContext -or -not $originalContext.Account) {
+			$authenticatedContext = Connect-RequestedAzAccount -CurrentContext $originalContext
+		}
+		else {
+			$authenticatedContext = $originalContext
+		}
+
+		$subscriptions = @(Get-AzSubscription -ErrorAction Stop | Where-Object { $_.State -eq 'Enabled' })
+		if (-not $subscriptions.Count) {
+			throw 'No enabled Azure subscriptions are available in the current context.'
+		}
+
+		$storageAccountNames = @($azureLocationInfo | Select-Object -ExpandProperty StorageAccountName -Unique)
+		$storageAccounts = @(Get-StorageAccountByName -Names $storageAccountNames -Subscriptions $subscriptions)
+		if (-not $storageAccounts.Count) {
+			throw 'No matching Azure Files storage accounts were found in the accessible subscriptions.'
+		}
+
+		$storageAccountsByName = @{}
+		foreach ($storageAccount in $storageAccounts) {
+			$storageAccountsByName[$storageAccount.Resource.name.ToLowerInvariant()] = $storageAccount
+		}
+
+		foreach ($storageAccountName in $storageAccountNames) {
+			$storageAccount = $storageAccountsByName[$storageAccountName.ToLowerInvariant()]
+			if ($null -eq $storageAccount) { continue }
+			$shareUsageMap = Get-StorageAccountShareUsageMap -StorageAccount $storageAccount
+			$matchingLocations = @($azureLocationInfo | Where-Object { $_.StorageAccountName -ieq $storageAccountName })
+			foreach ($locationInfo in $matchingLocations) {
+				$shareUsage = $shareUsageMap[$locationInfo.ShareName.ToLowerInvariant()]
+				if ($null -eq $shareUsage -or $null -eq $shareUsage.UsedBytes) { continue }
+				$locationUsage[$locationInfo.Location.ToLowerInvariant()] = [PSCustomObject]@{
+					Location = $locationInfo.Location
+					StorageAccountName = $locationInfo.StorageAccountName
+					ShareName = $locationInfo.ShareName
+					UsedBytes = [int64]$shareUsage.UsedBytes
+					UsedGB = [double]$shareUsage.UsedGB
+					UsageSource = 'AzureFilesShareStats'
+					UsageStatsAvailable = [bool]$shareUsage.UsageStatsAvailable
+				}
+			}
+		}
+
+		$usedBytesTotal = 0
+		foreach ($entry in $locationUsage.Values) {
+			$usedBytesTotal += [int64]$entry.UsedBytes
+		}
+
+		return [PSCustomObject]@{
+			Prompted = $true
+			Enabled = $true
+			Authenticated = $null -ne $authenticatedContext -and $null -ne $authenticatedContext.Account
+			DetectedLocationCount = $azureLocationInfo.Count
+			ResolvedLocationCount = $locationUsage.Count
+			LocationUsage = $locationUsage
+			TotalUsedBytes = [int64]$usedBytesTotal
+			TotalUsedGB = ConvertTo-BytesToGigabytes -Bytes $usedBytesTotal
+			UsageSource = if ($locationUsage.Count -eq $azureLocationInfo.Count) { 'Azure Files share stats' } else { 'Mixed Azure Files share stats and filesystem walk' }
+			SkippedReason = $null
+		}
+	}
+	catch {
+		Write-Warning "Azure Files share usage was skipped: $($_.Exception.Message)"
+		return [PSCustomObject]@{
+			Prompted = $true
+			Enabled = $false
+			Authenticated = $false
+			DetectedLocationCount = $azureLocationInfo.Count
+			ResolvedLocationCount = 0
+			LocationUsage = @{}
+			TotalUsedBytes = $null
+			TotalUsedGB = $null
+			UsageSource = 'FilesystemWalk'
+			SkippedReason = $_.Exception.Message
+		}
+	}
+	finally {
+		if ($null -ne $originalContext) {
+			try {
+				Set-AzContext -Context $originalContext -WarningAction SilentlyContinue | Out-Null
+			}
+			catch {
+			}
+		}
+	}
+}
+
 function Get-FSLogixDiscovery {
 	$localConfigPath = 'HKLM:\SOFTWARE\FSLogix\Profiles'
 	$policyConfigPath = 'HKLM:\SOFTWARE\Policies\FSLogix\Profiles'
@@ -1450,12 +1833,54 @@ function Get-FSLogixDiscovery {
 
 	$frxService = Get-Service -Name 'frxsvc' -ErrorAction SilentlyContinue
 	$profileLocationInventory = Get-FSLogixProfileFiles -ProfileLocations $profileLocations
+	$azureFilesShareUsage = Get-FSLogixAzureFilesShareUsage -ProfileLocations $profileLocations
+	$profileInventoryUsesAzureFiles = $azureFilesShareUsage.Enabled -and $azureFilesShareUsage.ResolvedLocationCount -gt 0
+	$profileInventoryDetails = @()
 	$totalProfileBytes = 0
 	$totalProfileCount = 0
+	$profileTotalSourceValues = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 	foreach ($locationInventory in @($profileLocationInventory)) {
-		$totalProfileBytes += [int64]$locationInventory.TotalSizeBytes
+		$locationKey = if ($locationInventory.PSObject.Properties['Location']) { Get-NormalizedText -Value $locationInventory.Location } else { $null }
+		$azureUsage = $null
+		if ($profileInventoryUsesAzureFiles -and -not [string]::IsNullOrWhiteSpace($locationKey)) {
+			$azureUsage = $azureFilesShareUsage.LocationUsage[$locationKey.ToLowerInvariant()]
+		}
+
+		$effectiveTotalBytes = [int64]$locationInventory.TotalSizeBytes
+		$effectiveTotalGB = $locationInventory.TotalSizeGB
+		$usageSource = 'Filesystem walk'
+		$usageStatsAvailable = $false
+		$shareUsageBytes = $null
+		$shareUsageGB = $null
+		if ($null -ne $azureUsage -and $null -ne $azureUsage.UsedBytes) {
+			$effectiveTotalBytes = [int64]$azureUsage.UsedBytes
+			$effectiveTotalGB = [Math]::Round(($effectiveTotalBytes / 1GB), 2)
+			$usageSource = 'Azure Files share stats'
+			$usageStatsAvailable = [bool]$azureUsage.UsageStatsAvailable
+			$shareUsageBytes = [int64]$azureUsage.UsedBytes
+			$shareUsageGB = [double]$azureUsage.UsedGB
+		}
+
+		$totalProfileBytes += [int64]$effectiveTotalBytes
 		$totalProfileCount += [int64]$locationInventory.ProfileContainerCount
+		[void]$profileTotalSourceValues.Add($usageSource)
+		$profileInventoryDetails += [PSCustomObject]@{
+			Location                = $locationInventory.Location
+			Accessible              = $locationInventory.Accessible
+			Exists                  = $locationInventory.Exists
+			ProfileContainerCount    = $locationInventory.ProfileContainerCount
+			TotalSizeBytes          = [int64]$effectiveTotalBytes
+			TotalSizeGB             = $effectiveTotalGB
+			ScanError               = $locationInventory.ScanError
+			UsageSource             = $usageSource
+			UsageStatsAvailable     = $usageStatsAvailable
+			ShareUsageBytes         = $shareUsageBytes
+			ShareUsageGB            = $shareUsageGB
+			OriginalTotalSizeBytes  = $locationInventory.TotalSizeBytes
+			OriginalTotalSizeGB     = $locationInventory.TotalSizeGB
+		}
 	}
+	$profileTotalSource = if ($profileTotalSourceValues.Count -gt 1) { 'Mixed Azure Files share stats and filesystem walk' } elseif ($profileTotalSourceValues.Contains('Azure Files share stats')) { 'Azure Files share stats' } else { 'Filesystem walk' }
 
 	[PSCustomObject]@{
 		Installed                   = ($null -ne $localConfig) -or ($null -ne $policyConfig) -or ($null -ne $frxService)
@@ -1480,10 +1905,20 @@ function Get-FSLogixDiscovery {
 			(Get-FSLogixRedirectionsXmlDiscovery -ComponentName 'ODFC' -EffectiveConfig $odfcEffectiveConfig)
 		)
 		AppMasking                  = Get-FSLogixAppMaskingDiscovery
-		ProfileLocationInventory    = $profileLocationInventory
+		AzureFilesShareStats        = [PSCustomObject]@{
+			Prompted               = $azureFilesShareUsage.Prompted
+			Enabled                = $azureFilesShareUsage.Enabled
+			Authenticated          = $azureFilesShareUsage.Authenticated
+			DetectedLocationCount  = $azureFilesShareUsage.DetectedLocationCount
+			ResolvedLocationCount  = $azureFilesShareUsage.ResolvedLocationCount
+			UsageSource            = $profileTotalSource
+			SkippedReason          = $azureFilesShareUsage.SkippedReason
+		}
+		ProfileLocationInventory    = $profileInventoryDetails
 		ProfileContainerCount       = $totalProfileCount
 		ProfileContainerTotalBytes  = if ($null -eq $totalProfileBytes) { 0 } else { [int64]$totalProfileBytes }
 		ProfileContainerTotalGB     = ConvertTo-BytesToGigabytes -Bytes $totalProfileBytes
+		ProfileContainerTotalSource = $profileTotalSource
 		RawLocalConfig              = $localConfig
 		RawPolicyConfig             = $policyConfig
 		OfficeContainerLocalConfig  = $odfcLocalConfig
@@ -2120,7 +2555,12 @@ function Get-GroupPolicyDiscovery {
 
 	try {
 		$gpresultArgs = @('/h', $tempFile, '/f')
-		if ($script:IsSystemAccountMode) { $gpresultArgs += @('/scope', 'computer') }
+		if ($script:IsSystemAccountMode) {
+			$gpresultArgs += @('/scope', 'computer')
+		}
+		else {
+			$gpresultArgs += @('/user', [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, '/scope', 'user')
+		}
 		$gpresultOutput = & gpresult.exe @gpresultArgs 2>&1
 		$exitCode = $LASTEXITCODE
 
@@ -2144,7 +2584,7 @@ function Get-GroupPolicyDiscovery {
 
 	[PSCustomObject]@{
 		Succeeded        = $succeeded
-		Note             = if ($script:IsSystemAccountMode -and $succeeded) { 'Report contains computer policy only (no user RSoP) - script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to include user Group Policy.' } else { $null }
+		Note             = if ($succeeded -and -not $script:IsSystemAccountMode) { 'Report contains user policy only (run elevated or as SYSTEM to capture computer policy as well).' } elseif ($script:IsSystemAccountMode -and $succeeded) { 'Report contains computer policy only (no user RSoP) - script is running as a system/machine account. Run Invoke-AvdSessionHostAudit.ps1 interactively on the host to include user Group Policy.' } else { $null }
 		HtmlReportPath   = if ($succeeded) { $OutputPath } else { $null }
 		Error            = $errorMessage
 	}
@@ -3360,7 +3800,7 @@ try {
 		if ($_gp.Succeeded) {
 			Write-CheckResult 'Success' "HTML report: $(Split-Path $gpResultHtmlPath -Leaf)"
 		} else {
-			Write-CheckResult 'Skipped' 'gpresult returned no data'
+				Write-CheckResult 'Skipped' $(if ($_gp.Error) { $_gp.Error } else { 'gpresult returned no data' })
 		}
 		$_gp
 	}
@@ -3418,22 +3858,36 @@ try {
 		}
 	}
 
-	$exportObject | ConvertTo-Json -Depth 10 |
-		ForEach-Object { [regex]::Replace($_, '(?m)^(    )+', { param($m) '  ' * ($m.Value.Length / 4) }) } |
-		ForEach-Object { $_ -replace ':  ', ': ' } |
-		Set-Content -Path $resolvedOutputPath -Encoding UTF8
 	$resolvedHtmlPath = [System.IO.Path]::ChangeExtension($resolvedOutputPath, '.html')
-	if (-not $NoHtml.IsPresent) {
-		$exportObject.HtmlGeneration = Invoke-OptionalHtmlReportGeneration -JsonPath $resolvedOutputPath -ReportType $exportObject.ReportType -OutputPath $resolvedHtmlPath
-		if ($exportObject.HtmlGeneration.Status -eq 'Generated' -and -not [string]::IsNullOrWhiteSpace($exportObject.HtmlGeneration.HtmlPath)) {
-			Add-SessionHostAuditArtifact -Path $exportObject.HtmlGeneration.HtmlPath
-		}
+	$stagingJsonPath = $resolvedOutputPath
+	$shouldStageJson = -not $NoHtml.IsPresent
+	if ($shouldStageJson) {
+		$stagingJsonPath = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ([System.IO.Path]::GetRandomFileName() + '.json')
 	}
 
-	$exportObject | ConvertTo-Json -Depth 10 |
-		ForEach-Object { [regex]::Replace($_, '(?m)^(    )+', { param($m) '  ' * ($m.Value.Length / 4) }) } |
-		ForEach-Object { $_ -replace ':  ', ': ' } |
-		Set-Content -Path $resolvedOutputPath -Encoding UTF8
+	try {
+		$exportObject | ConvertTo-Json -Depth 10 |
+			ForEach-Object { [regex]::Replace($_, '(?m)^(    )+', { param($m) '  ' * ($m.Value.Length / 4) }) } |
+			ForEach-Object { $_ -replace ':  ', ': ' } |
+			Set-Content -Path $stagingJsonPath -Encoding UTF8
+
+		if (-not $NoHtml.IsPresent) {
+			$exportObject.HtmlGeneration = Invoke-OptionalHtmlReportGeneration -JsonPath $stagingJsonPath -ReportType $exportObject.ReportType -OutputPath $resolvedHtmlPath
+			if ($exportObject.HtmlGeneration.Status -eq 'Generated' -and -not [string]::IsNullOrWhiteSpace($exportObject.HtmlGeneration.HtmlPath)) {
+				Add-SessionHostAuditArtifact -Path $exportObject.HtmlGeneration.HtmlPath
+			}
+		}
+
+		$exportObject | ConvertTo-Json -Depth 10 |
+			ForEach-Object { [regex]::Replace($_, '(?m)^(    )+', { param($m) '  ' * ($m.Value.Length / 4) }) } |
+			ForEach-Object { $_ -replace ':  ', ': ' } |
+			Set-Content -Path $resolvedOutputPath -Encoding UTF8
+	}
+	finally {
+		if ($stagingJsonPath -ne $resolvedOutputPath -and (Test-Path -Path $stagingJsonPath)) {
+			Remove-Item -Path $stagingJsonPath -Force
+		}
+	}
 
 	$_elapsed = $scriptStopwatch.Elapsed
 	$_elapsedStr = if ($_elapsed.TotalMinutes -ge 1) {
@@ -3442,8 +3896,6 @@ try {
 
 	Write-Rule
 	Write-Host (Format-Ansi "  `e[92mDiscovery complete in $_elapsedStr`e[0m")
-	Write-Host "  Applications  :  $(@($installedApps).Count)" -ForegroundColor DarkGray
-	Write-Host "  Output file   :  $resolvedOutputPath" -ForegroundColor Cyan
 	if ($exportObject.HtmlGeneration.Status -eq 'Generated') {
 		Write-Host "  HTML report   :  $($exportObject.HtmlGeneration.HtmlPath)" -ForegroundColor Cyan
 	}
