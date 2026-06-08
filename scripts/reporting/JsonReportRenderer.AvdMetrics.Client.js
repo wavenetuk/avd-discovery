@@ -851,6 +851,13 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			return 'host-pool-' + (subscriptionPart ? (subscriptionPart + '-') : '') + suffix;
 		}
 
+		function storageAccountAnchorId(account, fallbackIndex) {
+			const namePart = slugifyFragment(account && account.Name);
+			const subscriptionPart = slugifyFragment(account && (account.SubscriptionName || account.SubscriptionId));
+			const suffix = namePart || ('storage-account-' + ((fallbackIndex || 0) + 1));
+			return 'storage-account-' + (subscriptionPart ? (subscriptionPart + '-') : '') + suffix;
+		}
+
 		function storageTierBadgeVariant(tier) {
 			const normalized = tier ? String(tier).trim().toLowerCase() : '';
 			if (normalized === 'premium') { return 'tier-gold'; }
@@ -1745,12 +1752,10 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				usageSummaryTitle.className = 'pool-summary-title';
 				usageSummaryTitle.textContent = 'Usage Summary';
 				const usageGrid = document.createElement('div');
-				usageGrid.className = 'pool-grid usage';
 				const usageCards = [
 					createMetricCard('Authorised Users', pool.AuthorizedUserCount, 'Distinct authorised users resolved for this pool', null, 'AuthorizedUserCount', pool)
 				];
 				if (!/^NoDiagnosticSettings$/i.test(pool.SessionsStatus || '')) {
-					usageCards.push(createMetricCard('Peak User Count', /^NoUserActivity$/i.test(pool.SessionsStatus || '') ? 0 : pool.PeakConcurrentSessions, 'Highest concurrent sessions observed', null, 'PeakConcurrentSessions', pool));
 				}
 				if (!/^NoDiagnosticSettings$/i.test(pool.MetricStatus || '')) {
 					usageCards.push(createMetricCard('Daily Active Users', /^NoUserActivity$/i.test(pool.MetricStatus || '') ? 0 : pool.DailyAverageUsers, 'Average distinct users per sampled day', null, 'DailyAverageUsers', pool));
@@ -1764,7 +1769,6 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				hostSummaryTitle.className = 'pool-summary-title';
 				hostSummaryTitle.textContent = 'Host Summary';
 				const divider = document.createElement('div');
-				divider.className = 'pool-divider';
 				const grid = document.createElement('div');
 				grid.className = 'pool-grid host-summary-grid';
 				[
@@ -1795,7 +1799,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				};
 				const sessionHostsSection = createStaticPoolSection(
 					'Session Hosts',
-					wrapTable(createObjectTable(pool.SessionHostDetails || [], [], { hiddenColumns: ['PublicIpAddress', 'OutboundPublicIpAddress'] })),
+					wrapTable(createObjectTable(normalizeCollection(pool.SessionHostDetails), ['Name', 'IpAddress', 'Status', 'Sessions', 'AgentVersion', 'LastHeartBeat', 'AllowNewSession', 'AssignedUser', 'Backup'], { hiddenColumns: ['PublicIpAddress', 'OutboundPublicIpAddress'] })),
 					'session-hosts-detail'
 				);
 				if (sessionHostsSection) {
@@ -1839,6 +1843,90 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			});
 		}
 
+		function buildStorageAccountSections() {
+			const accounts = normalizeCollection(data.StorageAccountScan);
+			if (!accounts.length) { return; }
+			const section = document.getElementById('storage-account-section');
+			const stack = document.getElementById('storage-account-stack');
+			if (!section || !stack) { return; }
+			section.classList.remove('hidden');
+			stack.innerHTML = '';
+			accounts.forEach((account, index) => {
+				const panel = document.createElement('article');
+				panel.className = 'pool-panel storage-account-panel';
+				panel.id = storageAccountAnchorId(account, index);
+				panel.style.scrollMarginTop = '96px';
+
+				const titleWrap = document.createElement('div');
+				titleWrap.className = 'pool-title-wrap';
+				const header = document.createElement('div');
+				header.className = 'pool-header';
+				const title = document.createElement('h3');
+				title.textContent = account && account.Name ? account.Name : ('Storage Account ' + (index + 1));
+				const subtitle = document.createElement('p');
+				subtitle.textContent = (account && account.SubscriptionName && account.ResourceGroup) ? account.ResourceGroup : '';
+				titleWrap.append(title);
+
+				const highlights = createChipList([
+					{ label: 'Location', value: account.Location, rawValue: account.Location },
+					{ label: 'Subscription', value: account.SubscriptionName, rawValue: account.SubscriptionName },
+					{ label: 'Resource Group', value: account.ResourceGroup, rawValue: account.ResourceGroup }
+				], 'pool-highlights');
+				header.append(titleWrap, highlights);
+
+				const meta = createChipList([
+					{ label: 'Kind', value: account.Kind },
+					{ label: 'SKU', value: account.Sku },
+					{ label: 'Replication', value: account.ReplicationType },
+					{ label: 'File Shares', value: account.FileShareCount },
+					{ label: 'Private Endpoints', value: account.PrivateEndpointCount }
+				], 'pool-meta');
+
+				const summary = document.createElement('section');
+				summary.className = 'pool-summary-block usage-summary';
+				const summaryTitle = document.createElement('h4');
+				summaryTitle.className = 'pool-summary-title';
+				summaryTitle.textContent = 'Storage Summary';
+				const summaryGrid = document.createElement('div');
+				summaryGrid.className = 'pool-grid usage storage-summary-grid';
+				[
+					createMetricCard('Access Keys', account.AccessKeysEnabled ? 'Enabled' : 'Disabled', 'Storage account key access'),
+					createMetricCard('Encryption', account.EncryptionType || 'n/a', 'At-rest encryption mode'),
+					createMetricCard('Public Network Access', (account.PublicNetworkAccess || 'n/a') + ' (Default Action: ' + (account.NetworkDefaultAction || 'n/a') + ')', 'Public network access mode and default action')
+				].forEach((card) => summaryGrid.appendChild(card));
+				summary.append(summaryTitle, summaryGrid);
+
+				const details = document.createElement('div');
+				details.className = 'pool-details';
+				const createStaticStorageSection = (label, content, className) => {
+					if (content === null || content === undefined) { return null; }
+					const block = document.createElement('section');
+					block.className = 'pool-detail-static' + (className ? (' ' + className) : '');
+					const heading = document.createElement('h4');
+					heading.className = 'pool-detail-static-title';
+					heading.textContent = label;
+					block.appendChild(heading);
+					if (content && typeof content === 'object' && typeof content.nodeType === 'number') {
+						block.appendChild(content);
+					} else {
+						block.appendChild(renderStructuredValue(content, 0));
+					}
+					return block;
+				};
+				const storageDetails = createStaticStorageSection('Storage Account Details', createStorageAccountDetails(account), 'storage-account-detail');
+				if (storageDetails) {
+					details.appendChild(storageDetails);
+				}
+
+				panel.append(header);
+				if (subtitle.textContent) {
+					panel.append(subtitle);
+				}
+				panel.append(meta, summary, details);
+				stack.appendChild(panel);
+			});
+		}
+
 		function buildTable(sectionIdPrefix, title, copy, rows, preferredKeys, options) {
 			if (!rows.length) { return; }
 			document.getElementById(sectionIdPrefix + '-section').classList.remove('hidden');
@@ -1877,8 +1965,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				body.appendChild(createStatList([
 					{ label: 'Status', value: data.LicenseSummaryStatus },
 					{ label: 'Users Scanned', value: data.LicenseSummaryUserCount },
-					{ label: 'Unlicensed Users', value: data.UnlicensedUserCount },
-					{ label: 'Check Mode', value: 'Collected' }
+					{ label: 'Unlicensed Users', value: data.UnlicensedUserCount }
 				]));
 
 				const licenceSummaryRows = Array.isArray(data.LicenseSummary) ? data.LicenseSummary.filter((item) => isPlainObject(item)) : [];
@@ -1959,8 +2046,9 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			kpis.forEach((item) => kpiGrid.appendChild(createCard(item.label, item.value, item.detail)));
 			if (kind === 'metrics') {
 				buildTable('primary-table', 'Host Pools', 'Per-pool operational, usage, and access summary.', normalizeCollection(data.HostPools), ['Name', 'SubscriptionName', 'Location', 'HostPoolType', 'HostCount', 'AuthorizedUserCount', 'DailyAverageUsers', 'PeakConcurrentSessions', 'AvgCpuPercent', 'AvgMemUsedPercent']);
-				buildTable('secondary-table', 'Storage Accounts', 'FSLogix storage scan results included in the export, with share and network details available per storage account.', normalizeCollection(data.StorageAccountScan), ['Name', 'ResourceGroup', 'Location', 'Kind'], { detailRowFactory: (row) => createStorageAccountDetails(row), structuredDetailRows: false, hiddenColumns: ['Sku', 'SkuTier', 'ReplicationType', 'PublicNetworkAccess', 'NetworkDefaultAction', 'PrivateEndpointCount', 'FileShareCount'] });
+				buildTable('secondary-table', 'Storage Accounts', 'Per-account storage overview; detailed share and network panels are shown below.', normalizeCollection(data.StorageAccountScan), ['Name', 'SubscriptionName', 'ResourceGroup', 'Location', 'Kind', 'FileShareCount', 'PrivateEndpointCount'], { structuredDetailRows: false, hiddenColumns: ['Sku', 'SkuTier', 'ReplicationType', 'AccessKeysEnabled', 'EncryptionType', 'CmkKeyVaultUri', 'PublicNetworkAccess', 'NetworkDefaultAction', 'NetworkBypass', 'HttpsOnly', 'MinimumTlsVersion', 'PrivateEndpoints', 'IdentityBasedAuth', 'FileService', 'FileShares'] });
 				buildHostPoolSections();
+				buildStorageAccountSections();
 				buildLicensingSection();
 			} else if (kind === 'host') {
 				buildTable('primary-table', 'Applications', 'Installed application inventory from the host export.', normalizeCollection(data.Applications), ['DisplayName', 'DisplayVersion', 'Publisher', 'InstallDate', 'InstallLocation']);

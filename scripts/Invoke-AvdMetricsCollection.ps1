@@ -601,7 +601,13 @@ function Get-StorageAccountByName {
 	$nameSet = [System.Collections.Generic.HashSet[string]]::new($Names, [System.StringComparer]::OrdinalIgnoreCase)
 
 	foreach ($sub in $Subscriptions) {
-		Set-AzContext -SubscriptionId $sub.Id -WarningAction SilentlyContinue | Out-Null
+		try {
+			Set-AzContext -SubscriptionId $sub.Id -WarningAction SilentlyContinue -ErrorAction Stop | Out-Null
+		}
+		catch {
+			Write-Warning "Skipping subscription '$($sub.Name)' ($($sub.Id)) during storage scan - unable to set context: $($_.Exception.Message)"
+			continue
+		}
 		$resp = Invoke-ArmRequest -Path "/subscriptions/$($sub.Id)/providers/Microsoft.Storage/storageAccounts?api-version=2023-01-01" -Method GET -ErrorAction SilentlyContinue
 		if (-not $resp -or $resp.StatusCode -ne 200) { continue }
 
@@ -1040,7 +1046,13 @@ function Get-TargetSubscriptions {
 
 	if ($SubscriptionIds -and $SubscriptionIds.Count -gt 0) {
 		$subscriptions = foreach ($id in $SubscriptionIds) {
-			Get-AzSubscription -SubscriptionId $id
+			try {
+				Get-AzSubscription -SubscriptionId $id -ErrorAction Stop
+			}
+			catch {
+				Write-Warning "Skipping subscription '$id' - unable to read it: $($_.Exception.Message)"
+				continue
+			}
 		}
 	}
 	else {
@@ -1069,7 +1081,13 @@ function Get-AllHostPools {
 
 	foreach ($subscription in $Subscriptions) {
 		Write-Host "      Subscription : $($subscription.Name)  ($($subscription.Id))" -ForegroundColor DarkGray
-		Set-AzContext -SubscriptionId $subscription.Id -WarningAction SilentlyContinue | Out-Null
+		try {
+			Set-AzContext -SubscriptionId $subscription.Id -WarningAction SilentlyContinue -ErrorAction Stop | Out-Null
+		}
+		catch {
+			Write-Warning "Skipping subscription '$($subscription.Name)' ($($subscription.Id)) - unable to set context: $($_.Exception.Message)"
+			continue
+		}
 
 		$hostPools = Get-AzWvdHostPool -ErrorAction SilentlyContinue
 		if (-not $hostPools) {
@@ -1774,7 +1792,13 @@ function Get-HostPoolInfraInfo {
 												$sn = $vp.subnets | Where-Object { $_.name -ieq $subnetName } | Select-Object -First 1
 												if ($sn) {
 													$sp = $sn.properties
-													$subnetPrefix = if ($sp.PSObject.Properties['addressPrefix']) { $sp.addressPrefix } else { $null }
+													$subnetPrefix = if ($sp.PSObject.Properties['addressPrefix'] -and -not [string]::IsNullOrWhiteSpace([string]$sp.addressPrefix)) {
+														$sp.addressPrefix
+													} elseif ($sp.PSObject.Properties['addressPrefixes'] -and @($sp.addressPrefixes).Count -gt 0) {
+														@($sp.addressPrefixes | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join ', '
+													} else {
+														$null
+													}
 													$subnetNsg    = if ($sp.PSObject.Properties['networkSecurityGroup'] -and $sp.networkSecurityGroup -and
 													                     $sp.networkSecurityGroup.PSObject.Properties['id']) {
 														& $getNsgInfo -NsgId $sp.networkSecurityGroup.id } else { $null }
@@ -2081,7 +2105,7 @@ function Get-ReservationMatches {
 }
 
 # ------------------------------------------------------------------
-# Backup coverage (Personal pools only)
+# Backup coverage (Personal pools and Entra ID VM-based pools)
 # ------------------------------------------------------------------
 
 function Get-HostPoolBackupInfo {
@@ -5307,7 +5331,13 @@ try {
 		$poolIndex++
 		$script:_progressActivity = "Host Pool Checks  [$poolIndex/$($hostPools.Count)]  $($pool.Name)"
 		Write-PoolHeader -Index $poolIndex -Total $hostPools.Count -Pool $pool
-		Set-AzContext -SubscriptionId $pool.SubscriptionId -WarningAction SilentlyContinue | Out-Null
+		try {
+			Set-AzContext -SubscriptionId $pool.SubscriptionId -WarningAction SilentlyContinue -ErrorAction Stop | Out-Null
+		}
+		catch {
+			Write-Warning "Skipping host pool '$($pool.Name)' in subscription '$($pool.SubscriptionName)' ($($pool.SubscriptionId)) - unable to set context: $($_.Exception.Message)"
+			continue
+		}
 
 		$vmSizeCacheKey = "$($pool.SubscriptionId)/$($pool.Location)"
 		if (-not $vmSizeMemCache.ContainsKey($vmSizeCacheKey)) {
@@ -5356,7 +5386,8 @@ try {
 		}
 
 		Write-CheckStart 'Backup Info'
-		$backupInfo = if ($pool.HostPoolType -eq 'Personal') {
+		$useVmBackupChecks = $pool.HostPoolType -eq 'Personal' -or $infra.DomainJoinType -eq 'EntraID'
+		$backupInfo = if ($useVmBackupChecks) {
 			$_bi = Get-HostPoolBackupInfo -SubscriptionId $pool.SubscriptionId -VmResourceIds @($infra.VmResourceIds) -VaultCache $vaultCache
 			Write-CheckResult 'Success' "Status: $($_bi.BackupInfoStatus)"
 			$_bi
@@ -5476,7 +5507,7 @@ try {
 			AccessAssignments    = $authUsers.AccessAssignments
 			AuthorizedUserCount  = $authUsers.AuthorizedUserCount
 			AuthorizedUserStatus = $authUsers.AuthorizedUserStatus
-			SessionHostDetails       = if ($pool.HostPoolType -eq 'Personal' -and @($backupInfo.BackupInfo).Count -gt 0) {
+			SessionHostDetails       = if ($useVmBackupChecks -and @($backupInfo.BackupInfo).Count -gt 0) {
 				$backupLookup = @{}
 				foreach ($backupEntry in @($backupInfo.BackupInfo)) {
 					if (-not $backupEntry -or [string]::IsNullOrWhiteSpace([string]$backupEntry.VmName)) { continue }
@@ -5486,7 +5517,6 @@ try {
 					$backupEntry = $backupLookup[(([string]$_.Name -split '\.')[0]).ToLowerInvariant()]
 					$_ | Select-Object -Property @(
 						@{ Name = 'Name';                    Expression = { $_.Name } }
-						@{ Name = 'Backup';                  Expression = { if ($backupEntry) { if ($backupEntry.IsBackedUp) { 'Backed Up' } else { 'Not Backed Up' } } else { $null } } }
 						@{ Name = 'IpAddress';               Expression = { $_.IpAddress } }
 						@{ Name = 'PublicIpAddress';         Expression = { $_.PublicIpAddress } }
 						@{ Name = 'OutboundPublicIpAddress'; Expression = { $_.OutboundPublicIpAddress } }
@@ -5498,6 +5528,7 @@ try {
 						@{ Name = 'AssignedUser';            Expression = { $_.AssignedUser } }
 						@{ Name = 'UpdateState';             Expression = { $_.UpdateState } }
 						@{ Name = 'OsVersion';               Expression = { $_.OsVersion } }
+						@{ Name = 'Backup';                  Expression = { if ($backupEntry) { if ($backupEntry.IsBackedUp) { 'Backed Up' } else { 'Not Backed Up' } } else { $null } } }
 					)
 				})
 			} else {
