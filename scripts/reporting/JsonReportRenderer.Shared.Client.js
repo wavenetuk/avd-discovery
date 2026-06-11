@@ -274,7 +274,6 @@ function wireDynamicStickyOffset() {
 	document.documentElement.dataset.reportStickyOffsetBound = '1';
 	updateReportStickyOffset();
 	window.addEventListener('resize', updateReportStickyOffset);
-	window.addEventListener('scroll', updateReportStickyOffset, { passive: true });
 	if (typeof ResizeObserver === 'function') {
 		const nav = document.querySelector('.report-nav');
 		if (nav) {
@@ -383,11 +382,8 @@ function getHostPoolNavigationChildren(section) {
 			const label = heading && heading.textContent && heading.textContent.trim()
 				? heading.textContent.trim()
 				: 'Host Pool ' + (childIndex + 1);
-			return createNavigationEntry(
-				ensureSectionAnchor(node, 'report-host-pool-' + slugifyNavLabel(label || childIndex)),
-				label,
-				node
-			);
+			const anchorId = node.dataset.anchorId || ensureSectionAnchor(node, 'report-host-pool-' + slugifyNavLabel(label || childIndex));
+			return createNavigationEntry(anchorId, label, node);
 		});
 }
 
@@ -400,11 +396,8 @@ function getStorageAccountNavigationChildren(section) {
 			const label = heading && heading.textContent && heading.textContent.trim()
 				? heading.textContent.trim()
 				: 'Storage Account ' + (childIndex + 1);
-			return createNavigationEntry(
-				ensureSectionAnchor(node, 'report-storage-account-' + slugifyNavLabel(label || childIndex)),
-				label,
-				node
-			);
+			const anchorId = node.dataset.anchorId || ensureSectionAnchor(node, 'report-storage-account-' + slugifyNavLabel(label || childIndex));
+			return createNavigationEntry(anchorId, label, node);
 		});
 }
 
@@ -440,10 +433,74 @@ function getSectionNavigationEntries(section, index) {
 function navigateToReportTarget(id) {
 	const target = document.getElementById(id);
 	if (!target) { return; }
-	target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	const stickyOffset = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--report-sticky-offset')) || 92;
+	smoothScrollReportTo(target, stickyOffset);
 	if (window.location.hash !== '#' + id) {
 		history.replaceState(null, '', '#' + id);
 	}
+}
+
+let reportScrollAnimationFrame = null;
+let reportScrollSettleHandler = null;
+
+function smoothScrollReportTo(target, stickyOffset) {
+	if (!target) { return; }
+	const resolveTargetTop = () => Math.max(0, target.getBoundingClientRect().top + (window.scrollY || window.pageYOffset || 0) - stickyOffset);
+	const startTop = window.scrollY || window.pageYOffset || 0;
+	const targetTop = resolveTargetTop();
+	const distance = targetTop - startTop;
+	const absoluteDistance = Math.abs(distance);
+	if (absoluteDistance < 1) {
+		window.scrollTo(0, targetTop);
+		if (typeof reportScrollSettleHandler === 'function') {
+			reportScrollSettleHandler();
+		}
+		return;
+	}
+	if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+		window.scrollTo(0, targetTop);
+		if (typeof reportScrollSettleHandler === 'function') {
+			reportScrollSettleHandler();
+		}
+		return;
+	}
+	if (reportScrollAnimationFrame !== null) {
+		cancelAnimationFrame(reportScrollAnimationFrame);
+		reportScrollAnimationFrame = null;
+	}
+	if (absoluteDistance <= 80) {
+		window.scrollTo(0, targetTop);
+		if (typeof reportScrollSettleHandler === 'function') {
+			reportScrollSettleHandler();
+		}
+		return;
+	}
+	const isLongScroll = absoluteDistance > 240;
+	const duration = !isLongScroll
+		? Math.max(110, Math.min(180, absoluteDistance * 0.55))
+		: Math.max(360, Math.min(900, absoluteDistance * 0.06));
+	const startTime = performance.now();
+	const easeOutCubic = (value) => 1 - Math.pow(1 - value, 3);
+	const easeInOutCubic = (value) => (value < 0.5)
+		? 4 * value * value * value
+		: 1 - Math.pow(-2 * value + 2, 3) / 2;
+	const step = (now) => {
+		const progress = Math.min(1, (now - startTime) / duration);
+		const easedProgress = isLongScroll ? easeInOutCubic(progress) : easeOutCubic(progress);
+		const liveTargetTop = isLongScroll ? resolveTargetTop() : targetTop;
+		const nextTop = startTop + ((liveTargetTop - startTop) * easedProgress);
+		window.scrollTo(0, nextTop);
+		if (progress < 1) {
+			reportScrollAnimationFrame = requestAnimationFrame(step);
+			return;
+		}
+		window.scrollTo(0, resolveTargetTop());
+		reportScrollAnimationFrame = null;
+		if (typeof reportScrollSettleHandler === 'function') {
+			reportScrollSettleHandler();
+		}
+	};
+	reportScrollAnimationFrame = requestAnimationFrame(step);
 }
 
 function collectNavigationEntries(entries) {
@@ -480,6 +537,8 @@ function buildReportNavigation() {
 	if (hostPoolChildren.length) {
 		const hostPoolEntry = sections.find((entry) => entry.id === 'primary-table-section' || entry.label === 'Host Pools');
 		if (hostPoolEntry) {
+			hostPoolEntry.id = hostPoolSection.id;
+			hostPoolEntry.node = hostPoolSection;
 			hostPoolEntry.children = hostPoolChildren;
 		}
 	}
@@ -489,6 +548,8 @@ function buildReportNavigation() {
 	if (storageAccountChildren.length) {
 		const storageAccountEntry = sections.find((entry) => entry.id === 'secondary-table-section' || entry.label === 'Storage Accounts');
 		if (storageAccountEntry) {
+			storageAccountEntry.id = storageAccountSection.id;
+			storageAccountEntry.node = storageAccountSection;
 			storageAccountEntry.children = storageAccountChildren;
 		}
 	}
@@ -529,6 +590,7 @@ function buildReportNavigation() {
 
 	const flattenedSections = collectNavigationEntries(sections);
 	let lastActiveId = null;
+	let activeSyncFrame = null;
 
 	const syncActive = () => {
 		const threshold = 140;
@@ -552,8 +614,17 @@ function buildReportNavigation() {
 			lastActiveId = active.id;
 		}
 	};
+	const scheduleSyncActive = () => {
+		if (reportScrollAnimationFrame !== null) { return; }
+		if (activeSyncFrame !== null) { return; }
+		activeSyncFrame = requestAnimationFrame(() => {
+			activeSyncFrame = null;
+			syncActive();
+		});
+	};
+	reportScrollSettleHandler = syncActive;
 
 	syncActive();
-	window.addEventListener('scroll', syncActive, { passive: true });
-	window.addEventListener('resize', syncActive);
+	window.addEventListener('scroll', scheduleSyncActive, { passive: true });
+	window.addEventListener('resize', scheduleSyncActive);
 }

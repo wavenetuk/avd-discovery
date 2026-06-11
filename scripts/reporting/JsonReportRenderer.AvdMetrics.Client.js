@@ -328,6 +328,40 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			}
 		}
 
+		function positionTitleFlagTooltip(flag, tooltipNode) {
+			if (!flag || !tooltipNode) { return; }
+			const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+			const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+			const nav = document.querySelector('.report-nav');
+			const navRect = nav ? nav.getBoundingClientRect() : null;
+			const flagRect = flag.getBoundingClientRect();
+			const tooltipWidth = Math.min(320, Math.max(220, viewportWidth - 32));
+			const gap = 10;
+			const estimatedHeight = Math.max(96, tooltipNode.offsetHeight || 0);
+			const centerX = flagRect.left + (flagRect.width / 2);
+			const minCenterX = 16 + (tooltipWidth / 2);
+			const maxCenterX = Math.max(minCenterX, viewportWidth - 16 - (tooltipWidth / 2));
+			const resolvedCenterX = Math.min(maxCenterX, Math.max(minCenterX, centerX));
+			const navBottom = navRect ? navRect.bottom + 8 : 8;
+			let top = flagRect.bottom + gap;
+			let placement = 'below';
+			if (flagRect.top - gap - estimatedHeight >= navBottom) {
+				top = flagRect.top - gap - estimatedHeight;
+				placement = 'above';
+			} else if (top + estimatedHeight > viewportHeight - 12) {
+				top = Math.max(navBottom, viewportHeight - 12 - estimatedHeight);
+			}
+			tooltipNode.style.position = 'fixed';
+			tooltipNode.style.left = resolvedCenterX + 'px';
+			tooltipNode.style.top = top + 'px';
+			tooltipNode.style.width = tooltipWidth + 'px';
+			tooltipNode.style.zIndex = '40';
+			tooltipNode.style.transform = 'translateX(-50%)';
+			tooltipNode.style.opacity = '1';
+			tooltipNode.style.visibility = 'visible';
+			tooltipNode.dataset.placement = placement;
+		}
+
 		function orderedSectionEntries(kind, source) {
 			const order = kind === 'metrics'
 				? ['__ExecutionContext', '__Authentication', 'HostPools', '__Licensing', 'ArmCallStats']
@@ -415,7 +449,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			return badge;
 		}
 
-		function createTitleFlag(glyph, label, tone) {
+		function createTitleFlag(glyph, label, tone, tooltip, order) {
 			const flag = document.createElement('span');
 			flag.className = 'report-title-flag' + (tone ? ' ' + tone : '');
 			const labelNode = document.createElement('span');
@@ -424,8 +458,108 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			if (glyph) {
 				flag.dataset.flagCode = glyph;
 			}
+			if (order !== undefined && order !== null) {
+				flag.style.order = String(order);
+			}
+			if (tooltip) {
+				const tooltipText = String(tooltip);
+				const tooltipNode = document.createElement('span');
+				tooltipNode.className = 'report-title-flag-tooltip';
+				tooltipNode.textContent = tooltipText;
+				if (document.body) {
+					document.body.appendChild(tooltipNode);
+				}
+				flag.classList.add('has-tooltip');
+				flag.setAttribute('tabindex', '0');
+				flag.setAttribute('aria-label', label + '. ' + tooltipText);
+				flag.append(labelNode);
+				const syncTooltipPosition = () => {
+					if (flag.matches(':hover') || document.activeElement === flag) {
+						positionTitleFlagTooltip(flag, tooltipNode);
+					}
+				};
+				const showTooltip = () => positionTitleFlagTooltip(flag, tooltipNode);
+				const hideTooltip = () => {
+					tooltipNode.style.opacity = '0';
+					tooltipNode.style.visibility = 'hidden';
+					tooltipNode.style.position = '';
+					tooltipNode.style.left = '';
+					tooltipNode.style.top = '';
+					tooltipNode.style.width = '';
+					tooltipNode.style.zIndex = '';
+					tooltipNode.style.transform = '';
+					delete tooltipNode.dataset.placement;
+				};
+				flag.addEventListener('mouseenter', showTooltip);
+				flag.addEventListener('pointerenter', showTooltip);
+				flag.addEventListener('focus', showTooltip);
+				flag.addEventListener('mousemove', syncTooltipPosition);
+				flag.addEventListener('pointermove', syncTooltipPosition);
+				flag.addEventListener('mouseleave', hideTooltip);
+				flag.addEventListener('pointerleave', hideTooltip);
+				flag.addEventListener('blur', hideTooltip);
+				window.addEventListener('resize', syncTooltipPosition);
+				window.addEventListener('scroll', syncTooltipPosition, { passive: true });
+				return flag;
+			}
 			flag.append(labelNode);
 			return flag;
+		}
+
+		function poolHasLogAnalyticsGraphData(pool) {
+			if (!isPlainObject(pool)) { return false; }
+			return ['CpuDailyBreakdown', 'MemoryDailyBreakdown'].some((key) => normalizeCollection(pool[key]).length > 0);
+		}
+
+		function poolHasCollectedLogAnalyticsSeries(pool) {
+			if (!isPlainObject(pool)) { return false; }
+			if (poolHasLogAnalyticsGraphData(pool)) { return true; }
+			return ['DailyBreakdown', 'DailyPeakBreakdown'].some((key) => normalizeCollection(pool[key]).length > 0);
+		}
+
+		function poolHasUsageData(pool) {
+			if (!isPlainObject(pool)) { return false; }
+			if (normalizeCollection(pool.DailyBreakdown).length || normalizeCollection(pool.DailyPeakBreakdown).length) { return true; }
+			if (['DailyAverageUsers', 'PeakConcurrentSessions', 'DataPointCount'].some((key) => toNumber(pool[key]) !== null)) { return true; }
+			const statuses = [pool.MetricStatus, pool.SessionsStatus]
+				.map((value) => String(value || '').trim())
+				.filter(Boolean);
+			return statuses.some((status) => !/^NoDiagnosticSettings$/i.test(status) && !/^Error:/i.test(status));
+		}
+
+		function poolHasPerformanceData(pool) {
+			if (!isPlainObject(pool)) { return false; }
+			if (poolHasLogAnalyticsGraphData(pool)) { return true; }
+			return ['AvgCpuPercent', 'P95CpuPercent', 'P99CpuPercent', 'AvgMemUsedPercent', 'P95MemUsedPercent', 'P99MemUsedPercent']
+				.some((key) => toNumber(pool[key]) !== null);
+		}
+
+		function poolHasDiagnosticInsightsData(pool) {
+			if (!isPlainObject(pool) || !isPlainObject(pool.InsightsDiagnostics)) { return false; }
+			const status = String(pool.InsightsDiagnostics.QueryStatus || '').trim();
+			if (!status || /^NoDiagnosticSettings$/i.test(status)) { return false; }
+			return true;
+		}
+
+		function metricsReportType() {
+			const hostPools = normalizeCollection(data.HostPools);
+			const isEnhanced = hostPools.some((pool) => poolHasCollectedLogAnalyticsSeries(pool));
+			if (isEnhanced) {
+				return {
+					key: 'enhanced',
+					glyph: 'ER',
+					label: 'Enhanced Report',
+					tone: 'report-tier-enhanced',
+					tooltip: 'Includes Log Analytics-backed usage or diagnostics data for at least one host pool. Usage and performance visuals are shown where that data was collected.'
+				};
+			}
+			return {
+				key: 'basic',
+				glyph: 'BR',
+				label: 'Basic Report',
+				tone: 'report-tier-basic',
+				tooltip: 'No host pools returned Log Analytics-backed usage graph data for this report, so usage and performance KPIs are omitted.'
+			};
 		}
 
 		function reportTitleFlags(kind) {
@@ -440,6 +574,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			if (data.CommandOptions && data.CommandOptions.SkipLicenceCheck) {
 				flags.push({ glyph: 'LC', label: 'Licence Check Skipped', tone: 'warning' });
 			}
+			flags.push({ ...metricsReportType(), order: 20 });
 			return flags;
 		}
 
@@ -455,7 +590,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			if (!flags.length) { return; }
 			const wrap = document.createElement('span');
 			wrap.className = 'report-title-flags';
-			flags.forEach((flag) => wrap.appendChild(createTitleFlag(flag.glyph, flag.label, flag.tone)));
+			flags.forEach((flag) => wrap.appendChild(createTitleFlag(flag.glyph, flag.label, flag.tone, flag.tooltip, flag.order)));
 			title.appendChild(wrap);
 		}
 
@@ -482,12 +617,213 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			return card;
 		}
 
-		function parseDailyMetricSeries(rows, valueKey) {
+		function prefersReducedMotion() {
+			return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+		}
+
+		function createTickerValueNode(text, stateClass) {
+			const valueNode = document.createElement('span');
+			valueNode.className = 'metric-ticker-value' + (stateClass ? (' ' + stateClass) : '');
+			valueNode.textContent = text;
+			return valueNode;
+		}
+
+		function parseMetricTickerValue(value) {
+			if (typeof value === 'number' && Number.isFinite(value)) { return value; }
+			const normalized = String(value || '').replace(/,/g, '').replace(/%$/, '').trim();
+			if (!normalized) { return null; }
+			const parsed = Number(normalized);
+			return Number.isFinite(parsed) ? parsed : null;
+		}
+
+		function ensureMetricTicker(metric) {
+			let track = metric.querySelector('.metric-ticker-track');
+			if (track) { return track; }
+			const initialText = metric.textContent || '';
+			metric.textContent = '';
+			metric.classList.add('has-ticker');
+			track = document.createElement('span');
+			track.className = 'metric-ticker-track';
+			track.appendChild(createTickerValueNode(initialText, 'is-current'));
+			metric.appendChild(track);
+			return track;
+		}
+
+		function commitMetricTicker(metric, nextText) {
+			const track = ensureMetricTicker(metric);
+			track.innerHTML = '';
+			track.appendChild(createTickerValueNode(nextText, 'is-current'));
+			metric.classList.remove('is-ticker-animating');
+			metric.classList.remove('is-ticker-up', 'is-ticker-down');
+			metric.__tickerNumeric = parseMetricTickerValue(nextText);
+			if (metric.__tickerFrame) {
+				cancelAnimationFrame(metric.__tickerFrame);
+				metric.__tickerFrame = null;
+			}
+			if (metric.__tickerTimer) {
+				clearTimeout(metric.__tickerTimer);
+				metric.__tickerTimer = null;
+			}
+		}
+
+		function animateMetricTicker(metric, nextText) {
+			const resolvedText = String(nextText || '');
+			const track = ensureMetricTicker(metric);
+			const current = track.querySelector('.metric-ticker-value.is-current') || track.lastElementChild;
+			const currentText = current ? current.textContent : '';
+			const currentNumeric = metric.__tickerNumeric !== undefined ? metric.__tickerNumeric : parseMetricTickerValue(currentText);
+			const nextNumeric = parseMetricTickerValue(resolvedText);
+			const direction = nextNumeric !== null && currentNumeric !== null && nextNumeric !== currentNumeric
+				? (nextNumeric > currentNumeric ? 'up' : 'down')
+				: 'up';
+			if (currentText === resolvedText) { return; }
+			if (prefersReducedMotion() || !metric.isConnected) {
+				commitMetricTicker(metric, resolvedText);
+				return;
+			}
+			const token = (metric.__tickerToken || 0) + 1;
+			metric.__tickerToken = token;
+			if (metric.__tickerFrame) {
+				cancelAnimationFrame(metric.__tickerFrame);
+				metric.__tickerFrame = null;
+			}
+			if (metric.__tickerTimer) {
+				clearTimeout(metric.__tickerTimer);
+				metric.__tickerTimer = null;
+			}
+			track.replaceChildren();
+			metric.classList.remove('is-ticker-up', 'is-ticker-down');
+			metric.classList.add(direction === 'down' ? 'is-ticker-down' : 'is-ticker-up');
+			const outgoing = current || createTickerValueNode(currentText, 'is-current');
+			outgoing.classList.remove('is-current');
+			outgoing.classList.remove('is-next', 'is-ticker-in');
+			outgoing.classList.add('is-previous');
+			const incoming = createTickerValueNode(resolvedText, 'is-next');
+			track.append(outgoing, incoming);
+			track.getBoundingClientRect();
+			metric.classList.add('is-ticker-animating');
+			outgoing.classList.add('is-ticker-out');
+			incoming.classList.add('is-ticker-in');
+			const finalize = () => {
+				if (metric.__tickerToken !== token) { return; }
+				commitMetricTicker(metric, resolvedText);
+			};
+			incoming.addEventListener('transitionend', finalize, { once: true });
+			metric.__tickerTimer = setTimeout(finalize, 420);
+		}
+
+		function createUpdatableMetricCard(label, value, detail, variant, valueKey, context) {
+			const card = createMetricCard(label, value, detail, variant, valueKey, context);
+			const metric = card.querySelector('.metric');
+			const subtle = card.querySelector('.subtle');
+			ensureMetricTicker(metric);
+			return {
+				element: card,
+				set(nextValue, nextDetail) {
+					const resolvedValue = valueKey ? (resolveUnavailableMetricText(valueKey, nextValue, context) || nextValue) : nextValue;
+					animateMetricTicker(metric, typeof resolvedValue === 'string' ? resolvedValue : formatValue(resolvedValue));
+					if (typeof nextDetail === 'string') {
+						subtle.textContent = nextDetail;
+					}
+				}
+			};
+		}
+
+		function parseDailyMetricSeries(rows, valueKey, dayKey) {
+			const resolvedDayKey = dayKey || 'Day';
 			return normalizeCollection(rows)
-				.filter((item) => isPlainObject(item) && item.Day)
-				.map((item) => ({ day: String(item.Day), value: toNumber(item[valueKey]) }))
+				.filter((item) => isPlainObject(item) && item[resolvedDayKey])
+				.map((item) => ({ day: String(item[resolvedDayKey]), value: toNumber(item[valueKey]) }))
 				.filter((item) => item.day && item.value !== null)
 				.sort((left, right) => left.day.localeCompare(right.day));
+		}
+
+		function quantile(values, percentile) {
+			const clean = values.filter((value) => typeof value === 'number' && Number.isFinite(value)).slice().sort((left, right) => left - right);
+			if (!clean.length) { return null; }
+			if (clean.length === 1) { return clean[0]; }
+			const rank = Math.max(0, Math.min(clean.length - 1, (clean.length - 1) * percentile));
+			const lowerIndex = Math.floor(rank);
+			const upperIndex = Math.ceil(rank);
+			if (lowerIndex === upperIndex) { return clean[lowerIndex]; }
+			const weight = rank - lowerIndex;
+			return clean[lowerIndex] + ((clean[upperIndex] - clean[lowerIndex]) * weight);
+		}
+
+		function formatTrendShortDate(value) {
+			const date = parseIsoDate(value);
+			if (!date) { return String(value || ''); }
+			return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+		}
+
+		function formatTrendRangeLabel(startDay, endDay) {
+			if (!startDay || !endDay) { return 'No date range selected'; }
+			if (startDay === endDay) { return formatTrendShortDate(startDay); }
+			return formatTrendShortDate(startDay) + ' - ' + formatTrendShortDate(endDay);
+		}
+
+		function buildPoolTrendModel(pool) {
+			const cpuSeries = parseDailyMetricSeries(pool && pool.CpuDailyBreakdown, 'AvgCpuPercent');
+			const memorySeries = parseDailyMetricSeries(pool && pool.MemoryDailyBreakdown, 'AvgMemUsedPercent');
+			const userSeries = parseDailyMetricSeries(pool && pool.DailyBreakdown, 'UniqueUsers', 'Date');
+			const peakSeries = parseDailyMetricSeries(pool && pool.DailyPeakBreakdown, 'PeakConcurrentSessions', 'Date');
+			const averageHostsOnPerDay = toNumber(pool && pool.AverageHostsOnPerDay);
+			const daySet = new Set();
+			[cpuSeries, memorySeries, userSeries, peakSeries].forEach((series) => {
+				series.forEach((item) => daySet.add(item.day));
+			});
+			const days = expandTrendDays(Array.from(daySet).sort((left, right) => left.localeCompare(right)));
+			if (!days.length) { return null; }
+			const createSeriesMap = (series) => new Map(series.map((item) => [item.day, item.value]));
+			const cpuMap = createSeriesMap(cpuSeries);
+			const memoryMap = createSeriesMap(memorySeries);
+			const userMap = createSeriesMap(userSeries);
+			const peakMap = createSeriesMap(peakSeries);
+			const rows = days.map((day) => ({
+				day,
+				cpu: cpuMap.has(day) ? cpuMap.get(day) : null,
+				memory: memoryMap.has(day) ? memoryMap.get(day) : null,
+				users: userMap.has(day) ? userMap.get(day) : null,
+				peak: peakMap.has(day) ? peakMap.get(day) : null
+			}));
+			return {
+				rows,
+				cpuSeries,
+				memorySeries,
+				userSeries,
+				peakSeries,
+				averageHostsOnPerDay
+			};
+		}
+
+		function summarizePoolTrendSelection(model, startIndex, endIndex) {
+			if (!model || !Array.isArray(model.rows) || !model.rows.length) { return null; }
+			const safeStart = Math.max(0, Math.min(startIndex, model.rows.length - 1));
+			const safeEnd = Math.max(safeStart, Math.min(endIndex, model.rows.length - 1));
+			const selectedRows = model.rows.slice(safeStart, safeEnd + 1);
+			const cpuValues = selectedRows.map((row) => row.cpu).filter((value) => value !== null);
+			const memoryValues = selectedRows.map((row) => row.memory).filter((value) => value !== null);
+			const userValues = selectedRows.map((row) => row.users).filter((value) => value !== null);
+			const peakValues = selectedRows.map((row) => row.peak).filter((value) => value !== null);
+			const startDay = selectedRows.length ? selectedRows[0].day : null;
+			const endDay = selectedRows.length ? selectedRows[selectedRows.length - 1].day : null;
+			return {
+				startIndex: safeStart,
+				endIndex: safeEnd,
+				startDay,
+				endDay,
+				dayCount: selectedRows.length,
+				label: formatTrendRangeLabel(startDay, endDay),
+				cpuAverage: average(cpuValues),
+				cpuP95: quantile(cpuValues, 0.95),
+				cpuP99: quantile(cpuValues, 0.99),
+				memoryAverage: average(memoryValues),
+				memoryP95: quantile(memoryValues, 0.95),
+				memoryP99: quantile(memoryValues, 0.99),
+				dailyUsersAverage: average(userValues),
+				peakUsers: peakValues.length ? Math.max.apply(null, peakValues) : null,
+				isFullRange: safeStart === 0 && safeEnd === (model.rows.length - 1)
+			};
 		}
 
 		function parseIsoDate(value) {
@@ -569,6 +905,19 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			return segments;
 		}
 
+		function getTrendCoverageBounds(rows) {
+			let startIndex = -1;
+			let endIndex = -1;
+			rows.forEach((row, index) => {
+				if (toNumber(row.cpu) === null && toNumber(row.memory) === null) { return; }
+				if (startIndex === -1) {
+					startIndex = index;
+				}
+				endIndex = index;
+			});
+			return { startIndex, endIndex };
+		}
+
 		function formatTrendTooltipValue(value) {
 			const numeric = toNumber(value);
 			return numeric === null ? 'Omitted' : (formatValue(numeric) + '%');
@@ -602,23 +951,13 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			poolTrendRevealObserver.observe(card);
 		}
 
-		function createPoolPerformanceTrend(pool) {
-			const cpuSeries = parseDailyMetricSeries(pool && pool.CpuDailyBreakdown, 'AvgCpuPercent');
-			const memorySeries = parseDailyMetricSeries(pool && pool.MemoryDailyBreakdown, 'AvgMemUsedPercent');
-			const averageHostsOnPerDay = toNumber(pool && pool.AverageHostsOnPerDay);
-			if (!cpuSeries.length && !memorySeries.length) { return null; }
-
-			const daySet = new Set();
-			cpuSeries.forEach((item) => daySet.add(item.day));
-			memorySeries.forEach((item) => daySet.add(item.day));
-			const days = expandTrendDays(Array.from(daySet).sort((left, right) => left.localeCompare(right)));
-			const cpuMap = new Map(cpuSeries.map((item) => [item.day, item.value]));
-			const memoryMap = new Map(memorySeries.map((item) => [item.day, item.value]));
-			const rows = days.map((day) => ({
-				day,
-				cpu: cpuMap.has(day) ? cpuMap.get(day) : null,
-				memory: memoryMap.has(day) ? memoryMap.get(day) : null
-			}));
+		function createPoolPerformanceTrend(model, onSelectionChange) {
+			if (!model || !model.rows.length) { return null; }
+			const rows = model.rows;
+			const cpuSeries = model.cpuSeries;
+			const memorySeries = model.memorySeries;
+			const averageHostsOnPerDay = model.averageHostsOnPerDay;
+			const trendCoverage = getTrendCoverageBounds(rows);
 			const allValues = rows.flatMap((row) => [row.cpu, row.memory]).filter((value) => value !== null);
 			if (!allValues.length) { return null; }
 			const yMax = roundTrendMaximum(Math.max.apply(null, allValues));
@@ -641,9 +980,17 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			title.textContent = 'Daily CPU and Memory Trend';
 			const copy = document.createElement('p');
 			copy.className = 'pool-trend-copy';
-			copy.textContent = 'Daily average session-host utilisation across the scanned period.';
+			copy.textContent = 'Drag the range handles or tap points on the chart to focus the surrounding KPIs on a specific window.';
 			headText.append(title, copy);
 			head.append(headText);
+			const selectionPill = document.createElement('div');
+			selectionPill.className = 'pool-trend-selection-pill';
+			const selectionWindow = document.createElement('strong');
+			selectionWindow.className = 'pool-trend-selection-window';
+			const selectionMeta = document.createElement('span');
+			selectionMeta.className = 'pool-trend-selection-meta';
+			selectionPill.append(selectionWindow, selectionMeta);
+			head.appendChild(selectionPill);
 			if (averageHostsOnPerDay !== null) {
 				const hostBadge = document.createElement('span');
 				hostBadge.className = 'badge neutral pool-trend-badge';
@@ -689,6 +1036,76 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			const tooltip = document.createElement('div');
 			tooltip.className = 'pool-trend-tooltip';
 			tooltip.setAttribute('aria-hidden', 'true');
+			const selectionShadeLeft = createSvgNode('rect', {
+				x: margin.left,
+				y: margin.top,
+				width: 0,
+				height: plotHeight,
+				class: 'pool-trend-selection-shade'
+			});
+			const selectionShadeRight = createSvgNode('rect', {
+				x: width - margin.right,
+				y: margin.top,
+				width: 0,
+				height: plotHeight,
+				class: 'pool-trend-selection-shade'
+			});
+			const gapStartBand = createSvgNode('rect', {
+				x: margin.left,
+				y: margin.top,
+				width: 0,
+				height: plotHeight,
+				class: 'pool-trend-gap-band'
+			});
+			const gapStartBoundary = createSvgNode('line', {
+				x1: margin.left,
+				y1: margin.top,
+				x2: margin.left,
+				y2: margin.top + plotHeight,
+				class: 'pool-trend-gap-boundary'
+			});
+			const gapStartLabel = createSvgNode('text', {
+				x: margin.left + 10,
+				y: margin.top + 16,
+				class: 'pool-trend-gap-label'
+			});
+			gapStartLabel.textContent = 'MISSING DATA';
+			const selectionFrameLeft = createSvgNode('line', {
+				x1: margin.left,
+				y1: margin.top,
+				x2: margin.left,
+				y2: margin.top + plotHeight,
+				class: 'pool-trend-selection-frame pool-trend-selection-frame-left',
+				'aria-hidden': 'true'
+			});
+			const selectionFrameRight = createSvgNode('line', {
+				x1: width - margin.right,
+				y1: margin.top,
+				x2: width - margin.right,
+				y2: margin.top + plotHeight,
+				class: 'pool-trend-selection-frame pool-trend-selection-frame-right',
+				'aria-hidden': 'true'
+			});
+			const selectionClipId = 'pool-trend-selection-clip-' + Math.random().toString(36).slice(2, 10);
+			const selectionClip = createSvgNode('clipPath', {
+				id: selectionClipId,
+				clipPathUnits: 'userSpaceOnUse'
+			});
+			const selectionClipRect = createSvgNode('rect', {
+				x: margin.left,
+				y: margin.top,
+				width: plotWidth,
+				height: plotHeight
+			});
+			selectionClip.appendChild(selectionClipRect);
+			svg.appendChild(createSvgNode('defs', {})).appendChild(selectionClip);
+			const baseSeriesLayer = createSvgNode('g', { class: 'pool-trend-series-layer pool-trend-series-layer-base' });
+			baseSeriesLayer.style.color = 'var(--trend-muted-line)';
+			const selectedSeriesLayer = createSvgNode('g', {
+				class: 'pool-trend-series-layer pool-trend-series-layer-selected',
+				'clip-path': 'url(#' + selectionClipId + ')'
+			});
+			const missingTrendNodes = [];
 			const guide = createSvgNode('line', {
 				x1: margin.left,
 				y1: margin.top,
@@ -714,6 +1131,29 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				label.style.top = ((y / height) * 100).toFixed(2) + '%';
 				yAxis.appendChild(label);
 			}
+			if (trendCoverage.startIndex > 0) {
+				const gapRightX = xForIndex(trendCoverage.startIndex);
+				const gapWidth = Math.max(0, gapRightX - margin.left);
+				gapStartBand.setAttribute('width', String(gapWidth));
+				gapStartBoundary.setAttribute('x1', String(gapRightX));
+				gapStartBoundary.setAttribute('x2', String(gapRightX));
+				gapStartLabel.setAttribute('x', String(margin.left + (gapWidth / 2)));
+				gapStartLabel.setAttribute('y', String(margin.top + (plotHeight / 2)));
+				gapStartLabel.setAttribute('text-anchor', 'middle');
+				gapStartLabel.setAttribute('dominant-baseline', 'middle');
+				if (gapWidth < 96) {
+					gapStartLabel.setAttribute('opacity', '0');
+				}
+			} else {
+				gapStartLabel.setAttribute('opacity', '0');
+			}
+			svg.appendChild(selectionShadeLeft);
+			svg.appendChild(selectionShadeRight);
+			svg.appendChild(gapStartBand);
+			svg.appendChild(gapStartBoundary);
+			svg.appendChild(gapStartLabel);
+			svg.appendChild(selectionFrameLeft);
+			svg.appendChild(selectionFrameRight);
 			svg.appendChild(guide);
 
 			const xLabelIndexes = rows.length <= 6
@@ -733,7 +1173,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				{ key: 'memory', color: '#65c5d8' }
 			].forEach((series) => {
 				buildMissingTrendSegments(rows, series.key, xForIndex, yForValue).forEach((segment) => {
-					svg.appendChild(createSvgNode('path', {
+					missingTrendNodes.push(createSvgNode('path', {
 						d: segment.d,
 						fill: 'none',
 						stroke: '#d74c4c',
@@ -745,33 +1185,99 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				});
 				const path = buildTrendPath(rows, series.key, xForIndex, yForValue);
 				if (!path) { return; }
-				svg.appendChild(createSvgNode('path', {
+				baseSeriesLayer.appendChild(createSvgNode('path', {
+					d: path,
+					fill: 'none',
+					stroke: 'currentColor',
+					'stroke-width': 3,
+					'stroke-linecap': 'round',
+					'stroke-linejoin': 'round',
+					class: 'pool-trend-series pool-trend-series-base'
+				}));
+				selectedSeriesLayer.appendChild(createSvgNode('path', {
 					d: path,
 					fill: 'none',
 					stroke: series.color,
 					'stroke-width': 3,
 					'stroke-linecap': 'round',
 					'stroke-linejoin': 'round',
-					class: 'pool-trend-series'
+					class: 'pool-trend-series pool-trend-series-selected'
 				}));
 				rows.forEach((row, index) => {
 					const value = toNumber(row[series.key]);
 					if (value === null) { return; }
-					svg.appendChild(createSvgNode('circle', {
+					baseSeriesLayer.appendChild(createSvgNode('circle', {
+						cx: xForIndex(index),
+						cy: yForValue(value),
+						r: 3.5,
+						fill: 'currentColor',
+						class: 'pool-trend-point pool-trend-point-base'
+					}));
+					selectedSeriesLayer.appendChild(createSvgNode('circle', {
 						cx: xForIndex(index),
 						cy: yForValue(value),
 						r: 3.5,
 						fill: series.color,
-						class: 'pool-trend-point'
+						class: 'pool-trend-point pool-trend-point-selected'
 					}));
 				});
 			});
+			svg.appendChild(baseSeriesLayer);
+			svg.appendChild(selectedSeriesLayer);
+			missingTrendNodes.forEach((node) => svg.appendChild(node));
+
+			const sliderShell = document.createElement('div');
+			sliderShell.className = 'pool-trend-slider-shell';
+			const sliderSummary = document.createElement('div');
+			sliderSummary.className = 'pool-trend-slider-summary';
+			const sliderLabel = document.createElement('span');
+			sliderLabel.className = 'pool-trend-slider-label';
+			sliderLabel.textContent = 'Selected window';
+			const sliderWindow = document.createElement('strong');
+			sliderWindow.className = 'pool-trend-slider-window';
+			sliderSummary.append(sliderLabel, sliderWindow);
+			const sliderRail = document.createElement('div');
+			sliderRail.className = 'pool-trend-slider-rail';
+			const sliderTrack = document.createElement('div');
+			sliderTrack.className = 'pool-trend-slider-track';
+			const sliderRange = document.createElement('div');
+			sliderRange.className = 'pool-trend-slider-range';
+			const sliderMinIndex = trendCoverage.startIndex >= 0 ? trendCoverage.startIndex : 0;
+			const sliderMaxIndex = trendCoverage.endIndex >= 0 ? trendCoverage.endIndex : (rows.length - 1);
+			const startInput = document.createElement('input');
+			startInput.type = 'range';
+			startInput.className = 'pool-trend-slider pool-trend-slider-start';
+			startInput.min = '0';
+			startInput.max = String(rows.length - 1);
+			startInput.step = '1';
+			startInput.value = String(sliderMinIndex);
+			startInput.setAttribute('aria-label', 'Start of selected trend window');
+			const endInput = document.createElement('input');
+			endInput.type = 'range';
+			endInput.className = 'pool-trend-slider pool-trend-slider-end';
+			endInput.min = '0';
+			endInput.max = String(rows.length - 1);
+			endInput.step = '1';
+			endInput.value = String(sliderMaxIndex);
+			endInput.setAttribute('aria-label', 'End of selected trend window');
+			sliderRail.append(sliderTrack, sliderRange, startInput, endInput);
+			const sliderEndpoints = document.createElement('div');
+			sliderEndpoints.className = 'pool-trend-slider-endpoints';
+			const startLabel = document.createElement('span');
+			startLabel.textContent = formatTrendShortDate(rows[sliderMinIndex].day);
+			const endLabel = document.createElement('span');
+			endLabel.textContent = formatTrendShortDate(rows[sliderMaxIndex].day);
+			sliderEndpoints.append(startLabel, endLabel);
+			sliderShell.append(sliderSummary, sliderRail, sliderEndpoints);
 
 			const stepWidth = rows.length <= 1 ? plotWidth : (plotWidth / (rows.length - 1));
+			let pendingSelection = null;
+			let selectionFrame = null;
 			const showTooltip = (row, index) => {
 				tooltip.innerHTML = '<strong>' + row.day + '</strong>' +
 					'<span>CPU: ' + formatTrendTooltipValue(row.cpu) + '</span>' +
-					'<span>Memory: ' + formatTrendTooltipValue(row.memory) + '</span>';
+					'<span>Memory: ' + formatTrendTooltipValue(row.memory) + '</span>' +
+					'<span class="pool-trend-tooltip-note">Click to move the nearest range handle</span>';
 				tooltip.classList.add('is-visible');
 				tooltip.setAttribute('aria-hidden', 'false');
 				tooltip.classList.remove('is-edge-left', 'is-edge-right');
@@ -799,6 +1305,64 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				tooltip.setAttribute('aria-hidden', 'true');
 				guide.classList.add('hidden');
 			};
+			const syncSelectionVisuals = (startIndex, endIndex) => {
+				const left = xForIndex(startIndex);
+				const right = xForIndex(endIndex);
+				selectionShadeLeft.setAttribute('width', Math.max(0, left - margin.left));
+				selectionShadeRight.setAttribute('x', String(right));
+				selectionShadeRight.setAttribute('width', Math.max(0, (width - margin.right) - right));
+				selectionFrameLeft.setAttribute('x1', String(left));
+				selectionFrameLeft.setAttribute('x2', String(left));
+				selectionFrameRight.setAttribute('x1', String(right));
+				selectionFrameRight.setAttribute('x2', String(right));
+				selectionClipRect.setAttribute('x', String(left));
+				selectionClipRect.setAttribute('width', String(Math.max(6, right - left)));
+				const selectionSpan = Math.max(1, rows.length - 1);
+				const startPercent = (startIndex / selectionSpan) * 100;
+				const endPercent = (endIndex / selectionSpan) * 100;
+				sliderRange.style.left = startPercent.toFixed(2) + '%';
+				sliderRange.style.width = Math.max(0, endPercent - startPercent).toFixed(2) + '%';
+			};
+			const emitSelection = (startIndex, endIndex) => {
+				const summary = summarizePoolTrendSelection(model, startIndex, endIndex);
+				if (!summary) { return; }
+				const suffix = summary.dayCount === 1 ? '1 day selected' : (summary.dayCount + ' days selected');
+				selectionWindow.textContent = summary.label;
+				selectionMeta.textContent = summary.isFullRange ? 'Entire Window' : suffix;
+				sliderWindow.textContent = summary.label;
+				syncSelectionVisuals(summary.startIndex, summary.endIndex);
+				if (typeof onSelectionChange === 'function') {
+					onSelectionChange(summary);
+				}
+			};
+			const applySelection = (startIndex, endIndex) => {
+				emitSelection(startIndex, endIndex);
+			};
+			const setSelection = (nextStart, nextEnd) => {
+				const startIndex = Math.max(sliderMinIndex, Math.min(nextStart, sliderMaxIndex));
+				const endIndex = Math.max(startIndex, Math.min(nextEnd, sliderMaxIndex));
+				startInput.value = String(startIndex);
+				endInput.value = String(endIndex);
+				pendingSelection = { startIndex, endIndex };
+				if (selectionFrame !== null) { return; }
+				selectionFrame = requestAnimationFrame(() => {
+					selectionFrame = null;
+					if (!pendingSelection) { return; }
+					const selection = pendingSelection;
+					pendingSelection = null;
+					applySelection(selection.startIndex, selection.endIndex);
+				});
+			};
+			const handleStartInput = () => {
+				const nextStart = Math.max(sliderMinIndex, Math.min(Number(startInput.value), Number(endInput.value)));
+				setSelection(nextStart, Number(endInput.value));
+			};
+			const handleEndInput = () => {
+				const nextEnd = Math.min(sliderMaxIndex, Math.max(Number(endInput.value), Number(startInput.value)));
+				setSelection(Number(startInput.value), nextEnd);
+			};
+			startInput.addEventListener('input', handleStartInput);
+			endInput.addEventListener('input', handleEndInput);
 			rows.forEach((row, index) => {
 				const centerX = xForIndex(index);
 				const left = index === 0 ? margin.left : (centerX - (stepWidth / 2));
@@ -813,6 +1377,15 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				hit.addEventListener('mouseenter', () => showTooltip(row, index));
 				hit.addEventListener('mousemove', () => showTooltip(row, index));
 				hit.addEventListener('focus', () => showTooltip(row, index));
+				hit.addEventListener('click', () => {
+					const currentStart = Number(startInput.value);
+					const currentEnd = Number(endInput.value);
+					if (Math.abs(index - currentStart) <= Math.abs(index - currentEnd)) {
+						setSelection(Math.min(index, currentEnd), currentEnd);
+						return;
+					}
+					setSelection(currentStart, Math.max(index, currentStart));
+				});
 				hit.addEventListener('mouseleave', hideTooltip);
 				hit.addEventListener('blur', hideTooltip);
 				hit.setAttribute('tabindex', '0');
@@ -822,7 +1395,9 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			});
 
 			plot.append(svg, yAxis, xAxis);
-			card.append(head, legend, plot, tooltip);
+			card.append(head, legend, plot, tooltip, sliderShell);
+			const initialStartIndex = trendCoverage.startIndex > 0 ? trendCoverage.startIndex : 0;
+			setSelection(initialStartIndex, rows.length - 1);
 			wirePoolTrendReveal(card);
 			return card;
 		}
@@ -1182,39 +1757,6 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			const summary = document.createElement('summary');
 			summary.textContent = 'Host Pool Tags • ' + tagEntries.length + (tagEntries.length === 1 ? ' item' : ' items');
 			details.append(summary, wrapTable(createObjectTable(tagEntries.map(([key, value]) => ({ Key: key, Value: value })), ['Key', 'Value'], { structuredDetailRows: false })));
-			return details;
-		}
-
-		function createPoolUsageDetails(pool) {
-			const details = document.createElement('div');
-
-			const sections = [createStatList([
-				{ label: 'Daily Active Users', value: pool.DailyAverageUsers },
-				{ label: 'Usage Status', value: pool.MetricStatus },
-				{ label: 'Peak User Count', value: pool.PeakConcurrentSessions },
-				{ label: 'Peak Status', value: pool.SessionsStatus },
-				{ label: 'Sampled Days', value: pool.DataPointCount }
-			])];
-
-			const dailyBreakdown = Array.isArray(pool.DailyBreakdown) ? pool.DailyBreakdown.filter((item) => isPlainObject(item)) : [];
-			if (dailyBreakdown.length) {
-				const dailyBlock = document.createElement('details');
-				const dailySummary = document.createElement('summary');
-				dailySummary.textContent = 'Daily Active User Breakdown • ' + dailyBreakdown.length + (dailyBreakdown.length === 1 ? ' day' : ' days');
-				dailyBlock.append(dailySummary, wrapTable(createObjectTable(dailyBreakdown, ['Day', 'UniqueUsers'], { structuredDetailRows: false })));
-				sections.push(dailyBlock);
-			}
-
-			const peakBreakdown = Array.isArray(pool.DailyPeakBreakdown) ? pool.DailyPeakBreakdown.filter((item) => isPlainObject(item)) : [];
-			if (peakBreakdown.length) {
-				const peakBlock = document.createElement('details');
-				const peakSummary = document.createElement('summary');
-				peakSummary.textContent = 'Daily Peak User Breakdown • ' + peakBreakdown.length + (peakBreakdown.length === 1 ? ' day' : ' days');
-				peakBlock.append(peakSummary, wrapTable(createObjectTable(peakBreakdown, ['Day', 'PeakConcurrentSessions'], { structuredDetailRows: false })));
-				sections.push(peakBlock);
-			}
-
-			details.appendChild(createDetailStack(sections));
 			return details;
 		}
 
@@ -1622,14 +2164,21 @@ const REPORT_TITLE = __REPORT_TITLE__;
 		function buildHostPoolSections() {
 			const pools = normalizeCollection(data.HostPools);
 			if (!pools.length) { return; }
+			const isBasicReport = metricsReportType().key === 'basic';
 			document.getElementById('host-pool-section').classList.remove('hidden');
 			const stack = document.getElementById('host-pool-stack');
 			stack.innerHTML = '';
 			pools.forEach((pool, index) => {
+				const hasUsageData = !isBasicReport && poolHasUsageData(pool);
+				const hasPerformanceData = !isBasicReport && poolHasPerformanceData(pool);
+				const hasDiagnosticData = !isBasicReport && poolHasDiagnosticInsightsData(pool);
+				const trendModel = (hasUsageData || hasPerformanceData) ? buildPoolTrendModel(pool) : null;
 				const panel = document.createElement('article');
 				panel.className = 'pool-panel';
-				panel.id = hostPoolAnchorId(pool, index);
-				panel.style.scrollMarginTop = '96px';
+				const anchor = document.createElement('span');
+				anchor.id = hostPoolAnchorId(pool, index);
+				anchor.className = 'pool-panel-anchor';
+				panel.dataset.anchorId = anchor.id;
 				const diagnosticsStatus = pool.InsightsDiagnostics && pool.InsightsDiagnostics.QueryStatus
 					? pool.InsightsDiagnostics.QueryStatus
 					: (pool.MetricStatus || pool.SessionsStatus || '');
@@ -1720,49 +2269,88 @@ const REPORT_TITLE = __REPORT_TITLE__;
 					{ label: 'Validation Environment', value: pool.ValidationEnvironment },
 					{ label: 'Reservation Match Status', value: pool.ReservationMatchStatus }
 				], 'pool-meta');
-				const performanceEnvelope = document.createElement('section');
-				performanceEnvelope.className = 'pool-summary-block performance-envelope';
-				const performanceEnvelopeTitle = document.createElement('h4');
-				performanceEnvelopeTitle.className = 'pool-summary-title';
-				performanceEnvelopeTitle.textContent = 'Performance Envelope';
-				const performanceCpuRow = document.createElement('div');
-				performanceCpuRow.className = 'performance-envelope-row';
-				const performanceCpuGrid = document.createElement('div');
-				performanceCpuGrid.className = 'pool-grid performance-envelope-grid';
-				[
-					createMetricCard('CPU Average', formatPercentValue(pool.AvgCpuPercent), 'Mean CPU usage across sampled hosts', 'accent-cpu'),
-					createMetricCard('CPU P95', formatPercentValue(pool.P95CpuPercent), '95th percentile CPU usage across sampled hosts', 'accent-cpu', 'P95CpuPercent', pool),
-					createMetricCard('CPU P99', formatPercentValue(pool.P99CpuPercent), '99th percentile CPU usage across sampled hosts', 'accent-cpu', 'P99CpuPercent', pool)
-				].forEach((card) => performanceCpuGrid.appendChild(card));
-				performanceCpuRow.append(performanceCpuGrid);
-				const performanceMemoryRow = document.createElement('div');
-				performanceMemoryRow.className = 'performance-envelope-row';
-				const performanceMemoryGrid = document.createElement('div');
-				performanceMemoryGrid.className = 'pool-grid performance-envelope-grid';
-				[
-					createMetricCard('Memory Average', formatPercentValue(pool.AvgMemUsedPercent), 'Mean memory usage across sampled hosts', 'accent-memory'),
-					createMetricCard('Memory P95', formatPercentValue(pool.P95MemUsedPercent), '95th percentile memory usage across sampled hosts', 'accent-memory', 'P95MemUsedPercent', pool),
-					createMetricCard('Memory P99', formatPercentValue(pool.P99MemUsedPercent), '99th percentile memory usage across sampled hosts', 'accent-memory', 'P99MemUsedPercent', pool)
-				].forEach((card) => performanceMemoryGrid.appendChild(card));
-				performanceMemoryRow.append(performanceMemoryGrid);
-				performanceEnvelope.append(performanceEnvelopeTitle, performanceCpuRow, performanceMemoryRow);
-				const usageSummary = document.createElement('section');
-				usageSummary.className = 'pool-summary-block usage-summary';
-				const usageSummaryTitle = document.createElement('h4');
-				usageSummaryTitle.className = 'pool-summary-title';
-				usageSummaryTitle.textContent = 'Usage Summary';
-				const usageGrid = document.createElement('div');
-				const usageCards = [
-					createMetricCard('Authorised Users', pool.AuthorizedUserCount, 'Distinct authorised users resolved for this pool', null, 'AuthorizedUserCount', pool)
-				];
-				if (!/^NoDiagnosticSettings$/i.test(pool.SessionsStatus || '')) {
+				let performanceEnvelope = null;
+				const performanceKpis = {};
+				if (hasPerformanceData) {
+					performanceEnvelope = document.createElement('section');
+					performanceEnvelope.className = 'pool-summary-block performance-envelope';
+					const performanceEnvelopeTitle = document.createElement('h4');
+					performanceEnvelopeTitle.className = 'pool-summary-title';
+					performanceEnvelopeTitle.textContent = 'Performance Envelope';
+					const performanceCpuRow = document.createElement('div');
+					performanceCpuRow.className = 'performance-envelope-row';
+					const performanceCpuGrid = document.createElement('div');
+					performanceCpuGrid.className = 'pool-grid performance-envelope-grid';
+					performanceKpis.cpuAverage = createUpdatableMetricCard('CPU Average', formatPercentValue(pool.AvgCpuPercent), 'Mean CPU usage across sampled hosts', 'accent-cpu');
+					performanceKpis.cpuP95 = createUpdatableMetricCard('CPU P95', formatPercentValue(pool.P95CpuPercent), '95th percentile CPU usage across sampled hosts', 'accent-cpu', 'P95CpuPercent', pool);
+					performanceKpis.cpuP99 = createUpdatableMetricCard('CPU P99', formatPercentValue(pool.P99CpuPercent), '99th percentile CPU usage across sampled hosts', 'accent-cpu', 'P99CpuPercent', pool);
+					[
+						performanceKpis.cpuAverage,
+						performanceKpis.cpuP95,
+						performanceKpis.cpuP99
+					].forEach((card) => performanceCpuGrid.appendChild(card.element));
+					performanceCpuRow.append(performanceCpuGrid);
+					const performanceMemoryRow = document.createElement('div');
+					performanceMemoryRow.className = 'performance-envelope-row';
+					const performanceMemoryGrid = document.createElement('div');
+					performanceMemoryGrid.className = 'pool-grid performance-envelope-grid';
+					performanceKpis.memoryAverage = createUpdatableMetricCard('Memory Average', formatPercentValue(pool.AvgMemUsedPercent), 'Mean memory usage across sampled hosts', 'accent-memory');
+					performanceKpis.memoryP95 = createUpdatableMetricCard('Memory P95', formatPercentValue(pool.P95MemUsedPercent), '95th percentile memory usage across sampled hosts', 'accent-memory', 'P95MemUsedPercent', pool);
+					performanceKpis.memoryP99 = createUpdatableMetricCard('Memory P99', formatPercentValue(pool.P99MemUsedPercent), '99th percentile memory usage across sampled hosts', 'accent-memory', 'P99MemUsedPercent', pool);
+					[
+						performanceKpis.memoryAverage,
+						performanceKpis.memoryP95,
+						performanceKpis.memoryP99
+					].forEach((card) => performanceMemoryGrid.appendChild(card.element));
+					performanceMemoryRow.append(performanceMemoryGrid);
+					performanceEnvelope.append(performanceEnvelopeTitle, performanceCpuRow, performanceMemoryRow);
 				}
-				if (!/^NoDiagnosticSettings$/i.test(pool.MetricStatus || '')) {
-					usageCards.push(createMetricCard('Daily Active Users', /^NoUserActivity$/i.test(pool.MetricStatus || '') ? 0 : pool.DailyAverageUsers, 'Average distinct users per sampled day', null, 'DailyAverageUsers', pool));
+				let usageSummary = null;
+				const usageKpis = {};
+				if (hasUsageData) {
+					usageSummary = document.createElement('section');
+					usageSummary.className = 'pool-summary-block usage-summary';
+					const usageSummaryTitle = document.createElement('h4');
+					usageSummaryTitle.className = 'pool-summary-title';
+					usageSummaryTitle.textContent = 'Usage Summary';
+					const peakBreakdown = Array.isArray(pool.DailyPeakBreakdown) ? pool.DailyPeakBreakdown.filter((item) => isPlainObject(item)) : [];
+					const usageGrid = document.createElement('div');
+					usageGrid.className = 'pool-grid usage-summary-grid';
+					const usageCards = [];
+					usageKpis.authorizedUsers = createUpdatableMetricCard('Authorised Users', pool.AuthorizedUserCount, 'Distinct authorised users resolved for this pool', null, 'AuthorizedUserCount', pool);
+					usageCards.push(usageKpis.authorizedUsers);
+					if (!/^NoDiagnosticSettings$/i.test(pool.MetricStatus || '')) {
+						usageKpis.dailyUsers = createUpdatableMetricCard('Daily Active Users', /^NoUserActivity$/i.test(pool.MetricStatus || '') ? 0 : pool.DailyAverageUsers, 'Average distinct users per sampled day', null, 'DailyAverageUsers', pool);
+						usageCards.push(usageKpis.dailyUsers);
+					}
+					if (peakBreakdown.length) {
+						usageKpis.peakUsers = createUpdatableMetricCard('Peak Daily Users', pool.PeakConcurrentSessions, 'Highest sampled user concurrency across the reporting period', null, 'PeakConcurrentSessions', pool);
+						usageCards.push(usageKpis.peakUsers);
+					}
+					usageCards.forEach((card) => usageGrid.appendChild(card.element));
+					usageSummary.append(usageSummaryTitle, usageGrid);
 				}
-				usageCards.forEach((card) => usageGrid.appendChild(card));
-				usageSummary.append(usageSummaryTitle, usageGrid);
-				const performanceTrend = createPoolPerformanceTrend(pool);
+				const applyTrendSelection = (summary) => {
+					const periodLabel = summary.isFullRange ? 'the full reporting window' : (summary.dayCount === 1 ? summary.label : summary.label);
+					if (performanceKpis.cpuAverage) {
+						performanceKpis.cpuAverage.set(formatPercentValue(summary.cpuAverage), 'Average CPU during ' + periodLabel);
+						performanceKpis.cpuP95.set(formatPercentValue(summary.cpuP95), '95th percentile CPU within the selected window');
+						performanceKpis.cpuP99.set(formatPercentValue(summary.cpuP99), '99th percentile CPU within the selected window');
+						performanceKpis.memoryAverage.set(formatPercentValue(summary.memoryAverage), 'Average memory during ' + periodLabel);
+						performanceKpis.memoryP95.set(formatPercentValue(summary.memoryP95), '95th percentile memory within the selected window');
+						performanceKpis.memoryP99.set(formatPercentValue(summary.memoryP99), '99th percentile memory within the selected window');
+					}
+					if (usageKpis.authorizedUsers) {
+						usageKpis.authorizedUsers.set(pool.AuthorizedUserCount, 'Authorised scope remains fixed for this host pool');
+					}
+					if (usageKpis.dailyUsers) {
+						usageKpis.dailyUsers.set(summary.dailyUsersAverage === null ? null : formatValue(summary.dailyUsersAverage), summary.isFullRange ? 'Average distinct users per sampled day' : ('Average distinct users during ' + summary.label));
+					}
+					if (usageKpis.peakUsers) {
+						usageKpis.peakUsers.set(summary.peakUsers, summary.isFullRange ? 'Highest sampled user concurrency across the reporting period' : ('Highest sampled user concurrency during ' + summary.label));
+					}
+				};
+				const performanceTrend = (hasPerformanceData && trendModel) ? createPoolPerformanceTrend(trendModel, applyTrendSelection) : null;
 				const hostSummary = document.createElement('section');
 				hostSummary.className = 'pool-summary-block host-summary';
 				const hostSummaryTitle = document.createElement('h4');
@@ -1815,8 +2403,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				}
 				[
 					['Authorised Access', createPoolAccessDetails(pool)],
-					['User Activity', createPoolUsageDetails(pool)],
-					['Diagnostic Insights', createPoolDiagnosticInsightsDetails(pool)],
+					['Diagnostic Insights', hasDiagnosticData ? createPoolDiagnosticInsightsDetails(pool) : null],
 				].forEach(([label, value]) => {
 					if (value === null || value === undefined) { return; }
 					const block = document.createElement('details');
@@ -1834,12 +2421,19 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				if (subtitle.textContent) {
 					panel.append(subtitle);
 				}
-				panel.append(poolMeta, usageSummary, performanceEnvelope, hostSummary);
+				panel.append(poolMeta);
+				if (usageSummary) {
+					panel.append(usageSummary);
+				}
+				if (performanceEnvelope) {
+					panel.append(performanceEnvelope);
+				}
+				panel.append(hostSummary);
 				if (performanceTrend) {
 					performanceEnvelope.appendChild(performanceTrend);
 				}
 				panel.append(divider, details);
-				stack.appendChild(panel);
+				stack.append(anchor, panel);
 			});
 		}
 
@@ -1854,8 +2448,10 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			accounts.forEach((account, index) => {
 				const panel = document.createElement('article');
 				panel.className = 'pool-panel storage-account-panel';
-				panel.id = storageAccountAnchorId(account, index);
-				panel.style.scrollMarginTop = '96px';
+				const anchor = document.createElement('span');
+				anchor.id = storageAccountAnchorId(account, index);
+				anchor.className = 'pool-panel-anchor';
+				panel.dataset.anchorId = anchor.id;
 
 				const titleWrap = document.createElement('div');
 				titleWrap.className = 'pool-title-wrap';
@@ -1923,7 +2519,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 					panel.append(subtitle);
 				}
 				panel.append(meta, summary, details);
-				stack.appendChild(panel);
+				stack.append(anchor, panel);
 			});
 		}
 
@@ -2045,7 +2641,11 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			const kpiGrid = document.getElementById('kpi-grid');
 			kpis.forEach((item) => kpiGrid.appendChild(createCard(item.label, item.value, item.detail)));
 			if (kind === 'metrics') {
-				buildTable('primary-table', 'Host Pools', 'Per-pool operational, usage, and access summary.', normalizeCollection(data.HostPools), ['Name', 'SubscriptionName', 'Location', 'HostPoolType', 'HostCount', 'AuthorizedUserCount', 'DailyAverageUsers', 'PeakConcurrentSessions', 'AvgCpuPercent', 'AvgMemUsedPercent']);
+				const reportType = metricsReportType();
+				const hostPoolColumns = reportType.key === 'basic'
+					? ['Name', 'SubscriptionName', 'Location', 'HostPoolType', 'HostCount', 'AuthorizedUserCount']
+					: ['Name', 'SubscriptionName', 'Location', 'HostPoolType', 'HostCount', 'AuthorizedUserCount', 'DailyAverageUsers', 'PeakConcurrentSessions', 'AvgCpuPercent', 'AvgMemUsedPercent'];
+				buildTable('primary-table', 'Host Pools', 'Per-pool operational, usage, and access summary.', normalizeCollection(data.HostPools), hostPoolColumns);
 				buildTable('secondary-table', 'Storage Accounts', 'Per-account storage overview; detailed share and network panels are shown below.', normalizeCollection(data.StorageAccountScan), ['Name', 'SubscriptionName', 'ResourceGroup', 'Location', 'Kind', 'FileShareCount', 'PrivateEndpointCount'], { structuredDetailRows: false, hiddenColumns: ['Sku', 'SkuTier', 'ReplicationType', 'AccessKeysEnabled', 'EncryptionType', 'CmkKeyVaultUri', 'PublicNetworkAccess', 'NetworkDefaultAction', 'NetworkBypass', 'HttpsOnly', 'MinimumTlsVersion', 'PrivateEndpoints', 'IdentityBasedAuth', 'FileService', 'FileShares'] });
 				buildHostPoolSections();
 				buildStorageAccountSections();
