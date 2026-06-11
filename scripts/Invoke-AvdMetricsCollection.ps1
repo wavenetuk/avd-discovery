@@ -2033,6 +2033,7 @@ function Get-ReservationMatches {
 	#>
 	param(
 		[Parameter(Mandatory = $true)]
+		[AllowEmptyCollection()]
 		[string[]]$VmSkus,
 
 		[Parameter(Mandatory = $true)]
@@ -2049,6 +2050,13 @@ function Get-ReservationMatches {
 		return [PSCustomObject]@{
 			MatchedReservations     = @()
 			ReservationMatchStatus  = 'Unavailable'
+		}
+	}
+
+	if (@($VmSkus).Count -eq 0) {
+		return [PSCustomObject]@{
+			MatchedReservations     = @()
+			ReservationMatchStatus  = 'NoVmSkus'
 		}
 	}
 
@@ -5441,7 +5449,8 @@ try {
 		# Compute pool-level session host summary from the detail array
 		$shDetails = @($infra.SessionHostDetails)
 		$now       = [datetime]::UtcNow
-		$totalCurrentSessions = [int]($shDetails | Where-Object { $null -ne $_.Sessions } | Measure-Object -Property Sessions -Sum).Sum
+		$sessionCountMeasure = $shDetails | Where-Object { $null -ne $_.Sessions } | Measure-Object -Property Sessions -Sum
+		$totalCurrentSessions = if ($null -ne $sessionCountMeasure -and $null -ne $sessionCountMeasure.Sum) { [int]$sessionCountMeasure.Sum } else { 0 }
 		$hostsAvailable   = @($shDetails | Where-Object { $_.Status -eq 'Available' }).Count
 		# Keep running/shutdown counts on the same session-host status basis to avoid contradictory snapshots.
 		$hostsShutdown    = @($shDetails | Where-Object { $_.Status -eq 'Shutdown' }).Count
