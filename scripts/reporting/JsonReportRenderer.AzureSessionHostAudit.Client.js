@@ -343,6 +343,35 @@ function formatWindowsLapsPostAuthenticationActions(value) {
 	return formatValue(value);
 }
 
+function formatIntuneEnrollmentValue(value, mappings) {
+	const numeric = Number(value);
+	if (Number.isFinite(numeric) && Object.prototype.hasOwnProperty.call(mappings, numeric)) {
+		return mappings[numeric] + ' (' + numeric + ')';
+	}
+	if (Number.isFinite(numeric)) {
+		return 'Unknown (' + numeric + ')';
+	}
+	return formatValue(value);
+}
+
+function formatIntuneEnrollmentType(value) {
+	return formatIntuneEnrollmentValue(value, {
+		0: 'Unknown',
+		6: 'MDM joined',
+		13: 'Microsoft Entra joined'
+	});
+}
+
+function formatIntuneEnrollmentState(value) {
+	return formatIntuneEnrollmentValue(value, {
+		0: 'Unknown',
+		1: 'Enrolled',
+		2: 'Pending reset',
+		3: 'Failed',
+		4: 'Not contacted'
+	});
+}
+
 function createHostSection(title) {
 	const section = document.createElement('section');
 	section.className = 'section host-report-section interactive-surface';
@@ -500,6 +529,22 @@ function collectMappedDriveRows(userStates, currentSessionMappedDrives) {
 		}
 	});
 	return rows;
+}
+
+function summarizeOneDrivePolicyScope(policyLocations) {
+	const scopes = new Set();
+	(normalizeCollection(policyLocations) || []).forEach((location) => {
+		const registryPath = String(location && location.RegistryPath ? location.RegistryPath : '').toUpperCase();
+		if (registryPath.startsWith('HKLM:\\')) {
+			scopes.add('Machine scope');
+		} else if (registryPath.startsWith('HKCU:\\')) {
+			scopes.add('User scope');
+		}
+	});
+	if (!scopes.size) {
+		return 'None';
+	}
+	return Array.from(scopes).join(' / ');
 }
 
 function normalizeDriveLetterKey(value) {
@@ -836,7 +881,15 @@ function createSystemDetailsSection() {
 	if (toBooleanState(intune.Enrolled)) {
 		const records = normalizeCollection(intune.IntuneEnrollmentRecords);
 		if (records.length) {
-			appendHostTableBlock(section.body, 'Intune Enrollment Records', projectRows(records, ['EnrollmentId', 'ProviderID', 'UPN', 'AADTenantId', 'EnrollmentType', 'EnrollmentState']), ['EnrollmentId', 'ProviderID', 'UPN', 'AADTenantId', 'EnrollmentType', 'EnrollmentState']);
+			const enrolmentRows = records.map((row) => ({
+				EnrolmentId: row.EnrollmentId,
+				ProviderID: row.ProviderID,
+				UPN: row.UPN,
+				AADTenantId: row.AADTenantId,
+				EnrolmentType: formatIntuneEnrollmentType(row.EnrollmentType),
+				EnrolmentState: formatIntuneEnrollmentState(row.EnrollmentState)
+			}));
+			appendHostTableBlock(section.body, 'Intune Enrolment Records', enrolmentRows, ['EnrolmentId', 'ProviderID', 'UPN', 'AADTenantId', 'EnrolmentType', 'EnrolmentState']);
 		}
 	}
 	return section.section;
@@ -950,6 +1003,7 @@ function createUserProfileExperienceSection() {
 	const policies = upe.OneDrivePolicies || {};
 	appendHostStatBlock(section.body, 'OneDrive Policies', [
 		{ label: 'Policy Detected', value: yesNoValue(policies.PolicyDetected) },
+		{ label: 'Policy Scope', value: summarizeOneDrivePolicyScope(policies.PolicyLocations) },
 		{ label: 'KFM Silent Opt in Tenant ID', value: policies.KFMSilentOptInTenantId },
 		{ label: 'KFM Silent Opt In With Notify', value: yesNoValue(policies.KFMSilentOptInWithNotify) },
 		{ label: 'KFM Block Opt In', value: yesNoValue(policies.KFMBlockOptIn) },
@@ -958,7 +1012,6 @@ function createUserProfileExperienceSection() {
 		{ label: 'Silent Move Documents Enabled', value: yesNoValue(policies.SilentMoveDocumentsEnabled) },
 		{ label: 'Silent Move Pictures Enabled', value: yesNoValue(policies.SilentMovePicturesEnabled) }
 	]);
-	appendHostTableBlock(section.body, 'OneDrive Policy Locations', projectRows(normalizeCollection(policies.PolicyLocations), ['RegistryPath', 'Source']), ['RegistryPath', 'Source']);
 	const groupPolicyRows = objectEntriesRows(data.GroupPolicyRawValues || {});
 	if (groupPolicyRows.length) {
 		appendHostTableBlock(section.body, 'Group Policy', groupPolicyRows, ['Setting', 'Value']);

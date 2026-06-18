@@ -1347,11 +1347,11 @@ function Get-OneDrivePolicyState {
 		}
 
 		# Determine policy source:
-		#   - HKCU paths are always user-scoped Group Policy (not Intune MDM, which is machine-scoped)
-		#   - HKLM Policies hive: check MDM bridge to distinguish Intune from GP
+		#   - HKCU paths are user-scoped policy hive values
+		#   - HKLM Policies hive values may be mirrored by Intune MDM or written locally
 		$isHkcu   = $path -like 'HKCU:*'
 		$isIntune = (-not $isHkcu) -and ($null -ne $mdmBridgeValues) -and (@($mdmBridgeValues.PSObject.Properties).Count -gt 0)
-		$source   = if ($isHkcu) { 'GroupPolicy-User' } elseif ($isIntune) { 'Intune-MDM' } else { 'GroupPolicy-Computer' }
+		$source   = if ($isHkcu) { 'Registry-HKCU' } elseif ($isIntune) { 'Intune-MDM' } else { 'Registry-HKLM' }
 
 		[PSCustomObject]@{
 			RegistryPath = $path
