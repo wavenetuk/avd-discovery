@@ -456,7 +456,8 @@ const REPORT_TITLE = __REPORT_TITLE__;
 						GitHubBranch: data.CommandOptions.GitHubBranch,
 						LocalDiscoveryTimeout: data.CommandOptions.LocalDiscoveryTimeout,
 						OutputDirectory: data.CommandOptions.OutputDirectory,
-						ScanStorageAccounts: data.CommandOptions.ScanStorageAccounts
+						ScanStorageAccounts: data.CommandOptions.ScanStorageAccounts,
+						SkipStorageAccounts: data.CommandOptions.SkipStorageAccounts
 					} : null
 				}]);
 				if (data.AuthenticatedIdentity) {
@@ -2177,6 +2178,11 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				const searchText = JSON.stringify(row).toLowerCase();
 				const tr = document.createElement('tr');
 				tr.dataset.search = searchText;
+				const hoverText = formatLicenseHoverText(row ? row.Licenses : null);
+				if (hoverText) {
+					tr.title = hoverText;
+					tr.classList.add('has-hover-tooltip');
+				}
 				columns.forEach((column) => {
 					const td = document.createElement('td');
 					td.appendChild(createTableCellValue(column, row ? row[column] : null, row, tableOptions));
@@ -2778,7 +2784,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 					unlicensedBlock.open = true;
 					const unlicensedHeading = document.createElement('summary');
 					unlicensedHeading.textContent = 'Unlicensed Users • ' + unlicensedUsers.length + (unlicensedUsers.length === 1 ? ' user' : ' users');
-					unlicensedBlock.append(unlicensedHeading, wrapTable(createObjectTable(unlicensedUsers, ['DisplayName', 'UserPrincipalName', 'Status'], { structuredDetailRows: false })));
+					unlicensedBlock.append(unlicensedHeading, wrapTable(createObjectTable(unlicensedUsers, ['DisplayName', 'UserPrincipalName'], { structuredDetailRows: false, hiddenColumns: ['ObjectId', 'Licenses'] })));
 					body.appendChild(unlicensedBlock);
 				}
 			}

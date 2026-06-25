@@ -61,7 +61,9 @@ Enumerates all AVD host pools across one or more subscriptions.
 - Checks for an active (non-expired) registration token; reports expiry time if present
 
 **FSLogix Storage Account Scan** *(`-ScanStorageAccounts`)*
-- Locates each named storage account across all accessible subscriptions
+- By default, scans all accessible storage accounts and keeps only those that contain Azure Files shares
+- Use `-ScanStorageAccounts` to limit the scan to specific named storage accounts
+- Use `-SkipStorageAccounts` to disable storage scanning entirely
 - Collects: SKU, replication, kind, encryption, public access, private endpoints, network rules, SMB multichannel, soft-delete, identity-based auth (directory service, default share permission, domain name)
 - Per-file-share: provisioned size, used size/%, IOPS, bandwidth, tier, Azure Backup status
 
@@ -84,8 +86,8 @@ Both scripts also emit a self-contained HTML companion report next to the JSON e
 | `-UtcOffsetHours` | int | `0` | UTC offset for peak hours (e.g. `1` for BST) |
 | `-OutputDirectory` | string | script folder | Output directory |
 | `-SkipLicenceCheck` | switch | off | Skip Microsoft Graph licence collection |
-| `-NoHtml` | switch | off | Skip HTML report generation for the metrics export and any locally saved session host audit JSON retrieved during `-RunLocalDiscovery` |
-| `-ScanStorageAccounts` | string[] | *(none)* | Storage account names to scan; omit names to prompt |
+| `-ScanStorageAccounts` | string[] | *(none)* | Storage account names to scan instead of the default all-account search |
+| `-SkipStorageAccounts` | switch | off | Disable all storage account scanning |
 | `-RunLocalDiscovery` | switch | off | Run `Invoke-AvdSessionHostAudit.ps1` on a live VM per pool via VM Run Command |
 | `-InlineLocalScript` | switch | off | Embed the audit script in the payload instead of downloading from GitHub (use when VMs block outbound access to `raw.githubusercontent.com`) |
 | `-LocalDiscoveryTimeout` | int | `300` | Seconds to wait for on-VM script (60-3600) |
@@ -126,6 +128,9 @@ Both scripts also emit a self-contained HTML companion report next to the JSON e
 
 # Scan storage accounts for FSLogix configuration
 .\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -ScanStorageAccounts storageaccount1,storageaccount2
+
+# Skip storage scanning entirely
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -SkipStorageAccounts
 ```
 
 ---
