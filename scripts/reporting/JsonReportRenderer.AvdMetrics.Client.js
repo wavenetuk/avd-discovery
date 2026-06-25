@@ -83,8 +83,10 @@ const REPORT_TITLE = __REPORT_TITLE__;
 		function formatFieldValue(key, value) {
 			const compactKey = key ? String(key).replace(/[^A-Za-z0-9]/g, '').toLowerCase() : '';
 			if (compactKey === 'maxsessionlimit') {
-				const numeric = toNumber(value);
-				if (numeric !== null && numeric >= 999999) { return 'No Limit Set'; }
+				const numeric = typeof value === 'string'
+					? Number(value.replace(/,/g, ''))
+					: toNumber(value);
+				if (numeric !== null && numeric >= 99999) { return 'Unlimited'; }
 			}
 			if (new Set(['avgcpupercent', 'avgmemusedpercent', 'p95cpupercent', 'p95memusedpercent']).has(compactKey)) {
 				return formatPercentValue(value);
@@ -92,15 +94,67 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			return formatValue(value);
 		}
 
-		function formatLicenseHoverText(licenses) {
-			if (!Array.isArray(licenses)) { return null; }
-			const cleanLicenses = licenses.map((license) => String(license || '').trim()).filter(Boolean);
-			if (!cleanLicenses.length) {
-				return 'No licence assignments returned.';
+		function parseWindowsBuildNumber(osVersion) {
+			const versionText = String(osVersion || '').trim();
+			if (!versionText) { return null; }
+			const parts = versionText.split('.').map((part) => Number(part));
+			if (parts.length >= 3 && Number.isFinite(parts[2])) {
+				return parts[2];
 			}
-			return cleanLicenses.length === 1
-				? 'Licence held: ' + cleanLicenses[0]
-				: 'Licences held: ' + cleanLicenses.join(', ');
+			const match = versionText.match(/\b(\d{5})\b/);
+			return match ? Number(match[1]) : null;
+		}
+
+		function mapWindowsReleaseLabel(osVersion) {
+			const buildNumber = parseWindowsBuildNumber(osVersion);
+			if (buildNumber === null) { return null; }
+			if (buildNumber >= 26200) { return 'Windows 11 25H2'; }
+			if (buildNumber >= 26100) { return 'Windows 11 24H2'; }
+			if (buildNumber >= 22631) { return 'Windows 11 23H2'; }
+			if (buildNumber >= 22621) { return 'Windows 11 22H2'; }
+			if (buildNumber >= 22000) { return 'Windows 11 21H2'; }
+			if (buildNumber >= 20348) { return 'Windows Server 2022'; }
+			if (buildNumber >= 19045) { return 'Windows 10 22H2'; }
+			if (buildNumber >= 19044) { return 'Windows 10 21H2'; }
+			if (buildNumber >= 19043) { return 'Windows 10 21H1'; }
+			if (buildNumber >= 19042) { return 'Windows 10 20H2'; }
+			if (buildNumber >= 19041) { return 'Windows 10 2004'; }
+			if (buildNumber >= 17763) { return 'Windows Server 2019 / Windows 10 1809'; }
+			if (buildNumber >= 14393) { return 'Windows Server 2016'; }
+			return 'Windows build ' + buildNumber;
+		}
+
+		function getHostWindowsVersionSummary(pool) {
+			const hosts = normalizeCollection(pool && pool.SessionHostDetails);
+			const versionCounts = new Map();
+			let hostCount = 0;
+			hosts.forEach((host) => {
+				const label = mapWindowsReleaseLabel(host && host.OsVersion);
+				if (!label) { return; }
+				hostCount += 1;
+				versionCounts.set(label, (versionCounts.get(label) || 0) + 1);
+			});
+			if (!versionCounts.size) {
+				return null;
+			}
+			const orderedVersions = Array.from(versionCounts.entries()).sort((left, right) => {
+				if (right[1] !== left[1]) { return right[1] - left[1]; }
+				return left[0].localeCompare(right[0]);
+			});
+			const [topLabel] = orderedVersions[0];
+			const displayLabel = orderedVersions.length === 1 ? 'Windows Version' : 'Windows Version(s)';
+			if (orderedVersions.length === 1) {
+				return {
+					label: displayLabel,
+					value: topLabel,
+					detail: 'Detected across ' + hostCount + ' session host' + (hostCount === 1 ? '' : 's')
+				};
+			}
+			return {
+				label: displayLabel,
+				value: topLabel,
+				detail: 'Mixed session host versions: ' + orderedVersions.map(([label, count]) => label + ' (' + count + ')').join(', ')
+			};
 		}
 
 		function parseWindowsBuildNumber(osVersion) {
@@ -633,7 +687,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				glyph: 'BR',
 				label: 'Basic Report',
 				tone: 'report-tier-basic',
-				tooltip: 'No host pools returned Log Analytics-backed usage graph data for this report, so usage and performance KPIs are omitted.'
+				tooltip: 'No host pools returned Log Analytics-backed usage graph data for this report, so usage KPIs are omitted. CPU and memory performance metrics still render when Azure Monitor data is available.'
 			};
 		}
 
@@ -1551,7 +1605,15 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				if (share && share.ProvisionedBandwidthMiBps != null) {
 					meta.appendChild(createBadge(share.ProvisionedBandwidthMiBps + ' MiB/s', 'neutral'));
 				}
-				meta.appendChild(createBadge(share && share.BackupEnabled ? 'Backup Enabled' : 'Backup Not Enabled', share && share.BackupEnabled ? '' : 'neutral'));
+				if (share && share.Protocol) {
+					meta.appendChild(createBadge('Protocol: ' + share.Protocol, 'neutral'));
+				}
+				if (share && share.BackupEnabled) {
+					const protectionStatus = share.BackupProtectionStatus || 'Unknown';
+					meta.appendChild(createBadge('Backup Enabled: ' + protectionStatus, protectionStatus === 'Healthy' ? 'success' : 'danger'));
+				} else {
+					meta.appendChild(createBadge('Backup Not Enabled', 'neutral'));
+				}
 				item.append(title, meta);
 				wrapper.appendChild(item);
 			});
@@ -1624,6 +1686,71 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			return details;
 		}
 
+		function createStorageFeatureDetails(row) {
+			const features = [];
+			const fileService = row && row.FileService ? row.FileService : null;
+			if (fileService && Object.prototype.hasOwnProperty.call(fileService, 'SmbMultichannel')) {
+				features.push({ label: 'SMB Multichannel', value: fileService.SmbMultichannel ? 'Enabled' : 'Disabled' });
+			}
+			if (fileService && Object.prototype.hasOwnProperty.call(fileService, 'SoftDeleteEnabled')) {
+				const retainDays = toNumber(fileService.SoftDeleteRetainDays);
+				features.push({
+					label: 'Soft Delete',
+					value: fileService.SoftDeleteEnabled
+						? (retainDays !== null && retainDays > 0 ? ('Enabled (' + retainDays + ' Day' + (retainDays === 1 ? '' : 's') + ' Retention)') : 'Enabled')
+						: 'Disabled'
+				});
+			}
+			if (row && row.EncryptionType === 'CustomerManagedKey' && row.CmkKeyVaultUri) {
+				const cmkUri = String(row.CmkKeyVaultUri);
+				features.push({
+					label: 'CMK Key Vault URI',
+					valueNode: createTruncatedValueNode(cmkUri, cmkUri)
+				});
+			}
+			if (!features.length) { return null; }
+			const details = document.createElement('div');
+			details.className = 'storage-detail-section';
+			const summary = document.createElement('h4');
+			summary.className = 'storage-detail-title';
+			summary.textContent = 'Storage Features';
+			details.append(summary, createStatList(features));
+			return details;
+		}
+
+		function createStorageDirectoryServicesDetails(row) {
+			const identityAuth = row && row.IdentityBasedAuth ? row.IdentityBasedAuth : null;
+			if (!identityAuth) { return null; }
+			const items = [];
+			if (Object.prototype.hasOwnProperty.call(identityAuth, 'DirectoryServiceOptions') && identityAuth.DirectoryServiceOptions && identityAuth.DirectoryServiceOptions !== 'None') {
+				items.push({ label: 'Directory Service Options', value: identityAuth.DirectoryServiceOptions });
+			}
+			if (Object.prototype.hasOwnProperty.call(identityAuth, 'DomainName') && identityAuth.DomainName) {
+				items.push({ label: 'Domain Name', value: identityAuth.DomainName });
+			}
+			if (Object.prototype.hasOwnProperty.call(identityAuth, 'DefaultSharePermission') && identityAuth.DefaultSharePermission) {
+				items.push({ label: 'Default Share Permission', value: identityAuth.DefaultSharePermission });
+			}
+			if (!items.length) { return null; }
+			const details = document.createElement('div');
+			details.className = 'storage-detail-section';
+			const summary = document.createElement('h4');
+			summary.className = 'storage-detail-title';
+			summary.textContent = 'Directory Services';
+			details.append(summary, createStatList(items));
+			return details;
+		}
+
+		function createTruncatedValueNode(text, tooltipText) {
+			const value = document.createElement('strong');
+			value.className = 'storage-uri-value';
+			value.textContent = text;
+			if (tooltipText) {
+				value.title = tooltipText;
+			}
+			return value;
+		}
+
 		function createStatList(items) {
 			const wrapper = document.createElement('div');
 			wrapper.className = 'stat-list';
@@ -1633,8 +1760,10 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				const label = document.createElement('span');
 				label.className = 'muted';
 				label.textContent = item.label;
-				const value = document.createElement('strong');
-				value.textContent = formatValue(item.value);
+				const value = item.valueNode || document.createElement('strong');
+				if (!item.valueNode) {
+					value.textContent = formatValue(item.value);
+				}
 				row.append(label, value);
 				wrapper.appendChild(row);
 			});
@@ -1650,6 +1779,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				const chip = document.createElement('div');
 				chip.className = 'chip';
 				chip.dataset.chipLabel = String(item.label || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+				if (item.title) { chip.title = String(item.title); }
 				if (displayValue !== fullValue) { chip.title = fullValue; }
 				chip.innerHTML = '<strong>' + String(item.label).replace(/</g, '&lt;') + ':</strong> <span>' + displayValue.replace(/</g, '&lt;') + '</span>';
 				wrapper.appendChild(chip);
@@ -1710,19 +1840,12 @@ const REPORT_TITLE = __REPORT_TITLE__;
 
 		function createStorageShareDetails(row) {
 			const shares = row && Array.isArray(row.FileShares) ? row.FileShares.filter((item) => isPlainObject(item)) : [];
-			const shareMetadata = [];
-			if (row && row.ReplicationType) {
-				shareMetadata.push({ label: 'Replication Type', value: row.ReplicationType });
-			}
 			const details = document.createElement('div');
 			details.className = 'storage-detail-section';
 			const summary = document.createElement('h4');
 			summary.className = 'storage-detail-title';
 			summary.textContent = shares.length ? ('Shares (' + shares.length + (shares.length === 1 ? ' share' : ' shares') + ')') : 'Shares';
 			details.appendChild(summary);
-			if (shareMetadata.length) {
-				details.appendChild(createStatList(shareMetadata));
-			}
 			if (shares.length) {
 				details.appendChild(createStorageShareList(shares));
 			} else {
@@ -1732,6 +1855,52 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				details.appendChild(empty);
 			}
 			return details;
+		}
+
+		function formatPrivateEndpointSubnet(item) {
+			if (!item) { return 'None'; }
+			const pieces = [];
+			if (item.VirtualNetworkName) { pieces.push(item.VirtualNetworkName); }
+			if (item.SubnetName) { pieces.push(item.SubnetName); }
+			if (pieces.length) { return pieces.join(' / '); }
+			return item.SubnetId || 'None';
+		}
+
+		function createStoragePrivateEndpointSection(title, rows, preferredKeys) {
+			if (!rows.length) { return null; }
+			const section = document.createElement('div');
+			section.className = 'storage-detail-subsection';
+			const summary = document.createElement('h5');
+			summary.className = 'storage-detail-subtitle';
+			summary.textContent = title + ' • ' + rows.length + (rows.length === 1 ? ' item' : ' items');
+			section.append(summary, wrapTable(createObjectTable(rows, preferredKeys, { structuredDetailRows: false })));
+			return section;
+		}
+
+		function createStoragePrivateEndpointDetail(item) {
+			if (!item) { return null; }
+			const sections = [];
+
+			const customDnsConfigs = Array.isArray(item.CustomDnsConfigs) ? item.CustomDnsConfigs.filter((config) => isPlainObject(config)) : [];
+			if (customDnsConfigs.length) {
+				sections.push(createStoragePrivateEndpointSection('Custom DNS Records', customDnsConfigs.map((config) => ({
+					Fqdn: config.Fqdn,
+					IpAddresses: Array.isArray(config.IpAddresses)
+						? config.IpAddresses
+						: (config.IpAddresses ? config.IpAddresses : [])
+				})), ['Fqdn', 'IpAddresses']));
+			}
+
+			const privateDnsZones = Array.isArray(item.PrivateDnsZones) ? item.PrivateDnsZones.filter((zone) => isPlainObject(zone)) : [];
+			if (privateDnsZones.length) {
+				sections.push(createStoragePrivateEndpointSection('Private DNS Zones', privateDnsZones.map((zone) => ({
+					Name: zone.Name,
+					Subscription: zone.SubscriptionName || zone.SubscriptionId,
+					SubscriptionId: zone.SubscriptionId
+				})), ['Name', 'Subscription', 'SubscriptionId']));
+			}
+
+			return createDetailStack(sections);
 		}
 
 		function createStorageNetworkDetails(row) {
@@ -1758,17 +1927,15 @@ const REPORT_TITLE = __REPORT_TITLE__;
 
 			const privateEndpoints = row && Array.isArray(row.PrivateEndpoints) ? row.PrivateEndpoints.filter((item) => isPlainObject(item)) : [];
 			if (privateEndpoints.length) {
-				const endpointRows = privateEndpoints.map((item) => ({
-					Name: item.Name,
-					ConnectionStatus: item.ConnectionStatus,
-					ProvisioningState: item.ProvisioningState
+				const endpointRows = privateEndpoints.map((item) => Object.assign({}, item, {
+					Subnet: formatPrivateEndpointSubnet(item)
 				}));
 				const endpointDetails = document.createElement('div');
 				endpointDetails.className = 'storage-detail-subsection';
 				const endpointSummary = document.createElement('h5');
 				endpointSummary.className = 'storage-detail-subtitle';
 				endpointSummary.textContent = 'Private Endpoints • ' + privateEndpoints.length + (privateEndpoints.length === 1 ? ' item' : ' items');
-				endpointDetails.append(endpointSummary, wrapTable(createObjectTable(endpointRows, ['Name', 'ConnectionStatus', 'ProvisioningState'], { structuredDetailRows: false })));
+				endpointDetails.append(endpointSummary, wrapTable(createObjectTable(endpointRows, ['Name', 'ConnectionStatus', 'ProvisioningState', 'Subnet'], { structuredDetailRows: false, detailRowFactory: createStoragePrivateEndpointDetail, hiddenColumns: ['PrivateEndpointId', 'SubnetId', 'SubnetName', 'VirtualNetworkName', 'CustomDnsConfigs', 'PrivateDnsZones', 'SubnetDisplay', 'CustomDnsRecordCount', 'PrivateDnsZoneCount'] })));
 				sections.push(endpointDetails);
 			}
 
@@ -1779,7 +1946,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 		function createStorageAccountDetails(row) {
 			const wrapper = document.createElement('div');
 			wrapper.className = 'storage-account-detail';
-			const sections = [createStorageShareDetails(row), createStorageNetworkDetails(row)].filter(Boolean);
+			const sections = [createStorageFeatureDetails(row), createStorageDirectoryServicesDetails(row), createStorageShareDetails(row), createStorageNetworkDetails(row)].filter(Boolean);
 			sections.forEach((section, index) => {
 				if (index > 0) {
 					const divider = document.createElement('div');
@@ -1970,6 +2137,10 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			if (blockers) {
 				content.appendChild(createPlatformSection('Blockers', blockers));
 			}
+			const advisories = createPlatformMessageList(sso.Advisories, 'platform-note-list advisories');
+			if (advisories) {
+				content.appendChild(createPlatformSection('Advisories', advisories));
+			}
 			return createPlatformSection('SSO Config', content);
 		}
 
@@ -2010,10 +2181,21 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			content.className = 'detail-stack';
 			content.appendChild(createPlatformSection('Host Pool Settings', createStatList([
 				{ label: 'Start VM On Connect', value: pool.StartVMOnConnect },
+				{ label: 'Scaling Plan', value: pool.ScalingPlan ? 'Yes' : 'No' },
 				{ label: 'App Groups', value: Array.isArray(pool.AppGroupDetails) ? pool.AppGroupDetails.length : 0 },
 				{ label: 'Image References', value: Array.isArray(pool.ImageReferences) ? pool.ImageReferences.length : 0 }
 			])));
 			[createPoolNetworkDetails(pool), createPoolRdpPropertiesDetails(pool), createPoolSsoDetails(pool)].filter(Boolean).forEach((section) => content.appendChild(section));
+			const registrationToken = pool && pool.RegistrationToken ? pool.RegistrationToken : null;
+			if (registrationToken) {
+				const registrationTokenItems = [
+					{ label: 'Status', value: registrationToken.HasActiveToken ? 'Active' : 'Inactive' }
+				];
+				if (registrationToken.HasActiveToken && registrationToken.ExpiresAt) {
+					registrationTokenItems.push({ label: 'Expires At', value: registrationToken.ExpiresAt });
+				}
+				content.appendChild(createPlatformSection('Registration Token', createStatList(registrationTokenItems)));
+			}
 			const appGroups = Array.isArray(pool.AppGroupDetails) ? pool.AppGroupDetails.filter((item) => isPlainObject(item)) : [];
 			if (appGroups.length) {
 				content.appendChild(createPlatformSection('Application Groups', createSimplePropertyTable(appGroups.map((item) => ({
@@ -2024,6 +2206,10 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			const imageReferences = Array.isArray(pool.ImageReferences) ? pool.ImageReferences.filter((item) => isPlainObject(item)) : [];
 			if (imageReferences.length) {
 				content.appendChild(createPlatformSection('Image References', createSimplePropertyTable(imageReferences, ['Type', 'GalleryName', 'ImageDefinition', 'VersionInUse', 'TotalVersionsInGallery'])));
+			}
+			const vmExtensions = Array.isArray(pool.VmExtensions) ? pool.VmExtensions.filter((item) => isPlainObject(item)) : [];
+			if (vmExtensions.length) {
+				content.appendChild(createPlatformSection('VM Extensions', createSimplePropertyTable(vmExtensions, ['Type', 'Publisher'])));
 			}
 			return content;
 		}
@@ -2250,7 +2436,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			stack.innerHTML = '';
 			pools.forEach((pool, index) => {
 				const hasUsageData = !isBasicReport && poolHasUsageData(pool);
-				const hasPerformanceData = !isBasicReport && poolHasPerformanceData(pool);
+				const hasPerformanceData = poolHasPerformanceData(pool);
 				const hasDiagnosticData = !isBasicReport && poolHasDiagnosticInsightsData(pool);
 				const trendModel = (hasUsageData || hasPerformanceData) ? buildPoolTrendModel(pool) : null;
 				const panel = document.createElement('article');
@@ -2333,22 +2519,26 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				}
 				const subtitle = document.createElement('p');
 				subtitle.textContent = (pool.FriendlyName && pool.Name && pool.FriendlyName !== pool.Name) ? pool.Name : '';
+				const windowsVersionSummary = getHostWindowsVersionSummary(pool);
 				const poolHighlights = createChipList([
 					{ label: 'Location', value: pool.Location, rawValue: pool.Location },
 					{ label: 'Subscription', value: pool.SubscriptionName, rawValue: pool.SubscriptionName },
 					{ label: 'Resource Group', value: pool.ResourceGroup, rawValue: pool.ResourceGroup }
 				], 'pool-highlights');
 				header.append(titleWrap, poolHighlights);
-				const poolMeta = createChipList([
+				const poolMetaItems = [
 					{ label: 'Pool Type', value: pool.HostPoolType },
 					{ label: 'Load Balancer', value: pool.LoadBalancerType },
 					{ label: 'Domain Join', value: pool.DomainJoinType },
 					{ label: 'VM SKUs', value: pool.VmSkus },
 					{ label: 'Max Sessions', value: formatFieldValue('MaxSessionLimit', pool.MaxSessionLimit) },
-					{ label: 'Agent Versions', value: pool.AgentVersions },
 					{ label: 'Validation Environment', value: pool.ValidationEnvironment },
 					{ label: 'Reservation Match Status', value: pool.ReservationMatchStatus }
-				], 'pool-meta');
+				];
+				if (windowsVersionSummary) {
+					poolMetaItems.push({ label: windowsVersionSummary.label, value: windowsVersionSummary.value, title: windowsVersionSummary.detail });
+				}
+				const poolMeta = createChipList(poolMetaItems, 'pool-meta');
 				let performanceEnvelope = null;
 				const performanceKpis = {};
 				if (hasPerformanceData) {
@@ -2446,7 +2636,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 					createMetricCard('Hosts Shutdown', pool.HostsShutdown, 'Hosts currently powered off'),
 					createMetricCard('Hosts Unavailable', pool.HostsUnavailable, 'Hosts unavailable for broker placement'),
 					createMetricCard('Hosts Draining', pool.HostsDraining, 'Hosts set to stop taking new sessions')
-				].forEach((card) => grid.appendChild(card));
+				].filter(Boolean).forEach((card) => grid.appendChild(card));
 				hostSummary.append(hostSummaryTitle, grid);
 				const details = document.createElement('div');
 				details.className = 'pool-details';
@@ -2467,7 +2657,9 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				};
 				const sessionHostsSection = createStaticPoolSection(
 					'Session Hosts',
-					wrapTable(createObjectTable(normalizeCollection(pool.SessionHostDetails), ['Name', 'IpAddress', 'Status', 'Sessions', 'AgentVersion', 'LastHeartBeat', 'AllowNewSession', 'AssignedUser', 'Backup'], { hiddenColumns: ['PublicIpAddress', 'OutboundPublicIpAddress'] })),
+					wrapTable(createObjectTable(normalizeCollection(pool.SessionHostDetails).map((host) => Object.assign({}, host, {
+						WindowsVersion: mapWindowsReleaseLabel(host && host.OsVersion)
+					})), ['Name', 'IpAddress', 'Status', 'Sessions', 'AgentVersion', 'WindowsVersion', 'LastHeartBeat', 'AllowNewSession', 'AssignedUser', 'Backup'], { hiddenColumns: ['PublicIpAddress', 'OutboundPublicIpAddress', 'OsVersion'] })),
 					'session-hosts-detail'
 				);
 				if (sessionHostsSection) {
@@ -2539,8 +2731,6 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				header.className = 'pool-header';
 				const title = document.createElement('h3');
 				title.textContent = account && account.Name ? account.Name : ('Storage Account ' + (index + 1));
-				const subtitle = document.createElement('p');
-				subtitle.textContent = (account && account.SubscriptionName && account.ResourceGroup) ? account.ResourceGroup : '';
 				titleWrap.append(title);
 
 				const highlights = createChipList([
@@ -2595,9 +2785,6 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				}
 
 				panel.append(header);
-				if (subtitle.textContent) {
-					panel.append(subtitle);
-				}
 				panel.append(meta, summary, details);
 				stack.append(anchor, panel);
 			});

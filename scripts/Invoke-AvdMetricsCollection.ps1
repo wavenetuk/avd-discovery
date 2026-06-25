@@ -704,7 +704,10 @@ function Get-StorageAccountFSLogixInfo {
 		[PSCustomObject]$StorageAccount,   # result from Get-StorageAccountByName
 
 		[Parameter(Mandatory = $true)]
-		[hashtable]$VaultCache
+		[hashtable]$VaultCache,
+
+		[Parameter(Mandatory = $false)]
+		[object[]]$Subscriptions
 	)
 
 	$sa   = $StorageAccount.Resource
@@ -712,6 +715,104 @@ function Get-StorageAccountFSLogixInfo {
 	$rg    = $StorageAccount.ResourceGroup
 	$name  = $sa.name
 	$props = $sa.properties
+	$subscriptionNameLookup = @{}
+	foreach ($subscription in @($Subscriptions)) {
+		if ($null -ne $subscription -and $subscription.PSObject.Properties['Id'] -and $subscription.PSObject.Properties['Name']) {
+			$subscriptionNameLookup[$subscription.Id.ToLowerInvariant()] = [string]$subscription.Name
+		}
+	}
+
+	function Get-ResourceIdSegment {
+		param(
+			[Parameter(Mandatory = $true)]
+			[string]$ResourceId,
+
+			[Parameter(Mandatory = $true)]
+			[string]$SegmentName
+		)
+
+		if ([string]::IsNullOrWhiteSpace($ResourceId)) { return $null }
+		$parts = [string[]]($ResourceId -split '/')
+		$index = [Array]::IndexOf($parts, $SegmentName)
+		if ($index -ge 0 -and ($index + 1) -lt $parts.Length) {
+			return $parts[$index + 1]
+		}
+		return $null
+	}
+
+	function Get-PrivateEndpointDetails {
+		param(
+			[Parameter(Mandatory = $true)]
+			[string]$PrivateEndpointId,
+
+			[Parameter(Mandatory = $true)]
+			[hashtable]$SubscriptionNameLookup
+		)
+
+		$details = [ordered]@{
+			SubnetId          = $null
+			SubnetName        = $null
+			VirtualNetworkName = $null
+			CustomDnsConfigs   = @()
+			PrivateDnsZones    = @()
+		}
+
+		if ([string]::IsNullOrWhiteSpace($PrivateEndpointId)) {
+			return [PSCustomObject]$details
+		}
+
+		$privateEndpointResp = Invoke-ArmRequest -Path "$($PrivateEndpointId)?api-version=2023-09-01" -Method GET -ErrorAction SilentlyContinue
+		if (-not $privateEndpointResp -or $privateEndpointResp.StatusCode -ne 200) {
+			return [PSCustomObject]$details
+		}
+
+		$privateEndpointProps = ($privateEndpointResp.Content | ConvertFrom-Json).properties
+		if ($privateEndpointProps.PSObject.Properties['subnet'] -and $privateEndpointProps.subnet -and
+		    $privateEndpointProps.subnet.PSObject.Properties['id'] -and -not [string]::IsNullOrWhiteSpace($privateEndpointProps.subnet.id)) {
+			$details.SubnetId = $privateEndpointProps.subnet.id
+			$details.SubnetName = Get-ResourceIdSegment -ResourceId $details.SubnetId -SegmentName 'subnets'
+			$details.VirtualNetworkName = Get-ResourceIdSegment -ResourceId $details.SubnetId -SegmentName 'virtualNetworks'
+		}
+
+		if ($privateEndpointProps.PSObject.Properties['customDnsConfigs']) {
+			$details.CustomDnsConfigs = @(
+				foreach ($dnsConfig in @($privateEndpointProps.customDnsConfigs)) {
+					if (-not $dnsConfig) { continue }
+					[PSCustomObject]@{
+						Fqdn       = if ($dnsConfig.PSObject.Properties['fqdn']) { $dnsConfig.fqdn } else { $null }
+						IpAddresses = if ($dnsConfig.PSObject.Properties['ipAddresses']) { @($dnsConfig.ipAddresses) } else { @() }
+					}
+				}
+			)
+		}
+
+		$zoneIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+		if ($privateEndpointProps.PSObject.Properties['privateDnsZoneGroups']) {
+			$details.PrivateDnsZones = @(
+				foreach ($zoneGroup in @($privateEndpointProps.privateDnsZoneGroups)) {
+					$zoneGroupProps = if ($zoneGroup -and $zoneGroup.PSObject.Properties['properties']) { $zoneGroup.properties } else { $null }
+					if (-not $zoneGroupProps -or -not $zoneGroupProps.PSObject.Properties['privateDnsZoneConfigs']) { continue }
+					foreach ($zoneConfig in @($zoneGroupProps.privateDnsZoneConfigs)) {
+						$zoneConfigProps = if ($zoneConfig -and $zoneConfig.PSObject.Properties['properties']) { $zoneConfig.properties } else { $null }
+						if (-not $zoneConfigProps -or -not $zoneConfigProps.PSObject.Properties['privateDnsZoneId']) { continue }
+						$zoneId = [string]$zoneConfigProps.privateDnsZoneId
+						if ([string]::IsNullOrWhiteSpace($zoneId) -or -not $zoneIds.Add($zoneId)) { continue }
+						$zoneSubscriptionId = Get-ResourceIdSegment -ResourceId $zoneId -SegmentName 'subscriptions'
+						[PSCustomObject]@{
+							Name             = if ($zoneId -match '/privateDnsZones/([^/]+)$') { $Matches[1] } else { ($zoneId -split '/')[-1] }
+							Id               = $zoneId
+							SubscriptionId   = $zoneSubscriptionId
+							SubscriptionName = if ($zoneSubscriptionId -and $SubscriptionNameLookup.ContainsKey($zoneSubscriptionId.ToLowerInvariant())) {
+								$SubscriptionNameLookup[$zoneSubscriptionId.ToLowerInvariant()]
+							} else { $null }
+						}
+					}
+				}
+			)
+		}
+
+		return [PSCustomObject]$details
+	}
 
 	# ── Basic properties ──────────────────────────────────────────────────────
 	$skuName    = if ($sa.sku.PSObject.Properties['name']) { $sa.sku.name } else { $null }
@@ -766,11 +867,19 @@ function Get-StorageAccountFSLogixInfo {
 		if ($props.PSObject.Properties['privateEndpointConnections']) {
 			foreach ($pec in @($props.privateEndpointConnections)) {
 				$pecProps = $pec.properties
+				$privateEndpointId = if ($pecProps.PSObject.Properties['privateEndpoint']) { $pecProps.privateEndpoint.id } else { $null }
+				$privateEndpointDetails = Get-PrivateEndpointDetails -PrivateEndpointId $privateEndpointId -SubscriptionNameLookup $subscriptionNameLookup
 				[PSCustomObject]@{
-					Name              = ($pec.id -split '/')[-1]
-					PrivateEndpointId = if ($pecProps.PSObject.Properties['privateEndpoint'])  { $pecProps.privateEndpoint.id }    else { $null }
-					ProvisioningState = if ($pecProps.PSObject.Properties['provisioningState']) { $pecProps.provisioningState }     else { $null }
-					ConnectionStatus  = if ($pecProps.PSObject.Properties['privateLinkServiceConnectionState']) { $pecProps.privateLinkServiceConnectionState.status } else { $null }
+					Name               = ($pec.id -split '/')[-1]
+					PrivateEndpointId  = $privateEndpointId
+					ProvisioningState  = if ($pecProps.PSObject.Properties['provisioningState']) { $pecProps.provisioningState } else { $null }
+					ConnectionStatus   = if ($pecProps.PSObject.Properties['privateLinkServiceConnectionState']) { $pecProps.privateLinkServiceConnectionState.status } else { $null }
+					SubnetDisplay      = if ($privateEndpointDetails.VirtualNetworkName -and $privateEndpointDetails.SubnetName) { "$($privateEndpointDetails.VirtualNetworkName)/$($privateEndpointDetails.SubnetName)" } else { $privateEndpointDetails.SubnetName }
+					SubnetId          = $privateEndpointDetails.SubnetId
+					SubnetName        = $privateEndpointDetails.SubnetName
+					VirtualNetworkName = $privateEndpointDetails.VirtualNetworkName
+					CustomDnsConfigs   = $privateEndpointDetails.CustomDnsConfigs
+					PrivateDnsZones    = $privateEndpointDetails.PrivateDnsZones
 				}
 			}
 		}
@@ -5686,7 +5795,7 @@ try {
 					Write-Host "  `e[90mSubscription : $($_saEntry.SubscriptionName)  |  RG : $($_saEntry.ResourceGroup)  |  Region : $($_saEntry.Resource.location)`e[0m"
 					Write-Host "  `e[90m$_bar`e[0m"
 					Write-CheckStart 'Storage Account Details'
-					$_saInfo = Get-StorageAccountFSLogixInfo -StorageAccount $_saEntry -VaultCache $vaultCache
+					$_saInfo = Get-StorageAccountFSLogixInfo -StorageAccount $_saEntry -VaultCache $vaultCache -Subscriptions $subscriptions
 					$_skuStr = "$($_saInfo.Sku)  ($($_saInfo.ReplicationType))"
 					Write-CheckResult 'Success' "SKU: $_skuStr  |  Kind: $($_saInfo.Kind)  |  Shares: $($_saInfo.FileShareCount)"
 
