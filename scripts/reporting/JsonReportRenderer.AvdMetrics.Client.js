@@ -94,6 +94,17 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			return formatValue(value);
 		}
 
+		function formatLicenseHoverText(licenses) {
+			if (!Array.isArray(licenses)) { return null; }
+			const cleanLicenses = licenses.map((license) => String(license || '').trim()).filter(Boolean);
+			if (!cleanLicenses.length) {
+				return 'No licence assignments returned.';
+			}
+			return cleanLicenses.length === 1
+				? 'Licence held: ' + cleanLicenses[0]
+				: 'Licences held: ' + cleanLicenses.join(', ');
+		}
+
 		function parseWindowsBuildNumber(osVersion) {
 			const versionText = String(osVersion || '').trim();
 			if (!versionText) { return null; }
