@@ -157,6 +157,69 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			};
 		}
 
+		function parseWindowsBuildNumber(osVersion) {
+			const versionText = String(osVersion || '').trim();
+			if (!versionText) { return null; }
+			const parts = versionText.split('.').map((part) => Number(part));
+			if (parts.length >= 3 && Number.isFinite(parts[2])) {
+				return parts[2];
+			}
+			const match = versionText.match(/\b(\d{5})\b/);
+			return match ? Number(match[1]) : null;
+		}
+
+		function mapWindowsReleaseLabel(osVersion) {
+			const buildNumber = parseWindowsBuildNumber(osVersion);
+			if (buildNumber === null) { return null; }
+			if (buildNumber >= 26200) { return 'Windows 11 25H2'; }
+			if (buildNumber >= 26100) { return 'Windows 11 24H2'; }
+			if (buildNumber >= 22631) { return 'Windows 11 23H2'; }
+			if (buildNumber >= 22621) { return 'Windows 11 22H2'; }
+			if (buildNumber >= 22000) { return 'Windows 11 21H2'; }
+			if (buildNumber >= 20348) { return 'Windows Server 2022'; }
+			if (buildNumber >= 19045) { return 'Windows 10 22H2'; }
+			if (buildNumber >= 19044) { return 'Windows 10 21H2'; }
+			if (buildNumber >= 19043) { return 'Windows 10 21H1'; }
+			if (buildNumber >= 19042) { return 'Windows 10 20H2'; }
+			if (buildNumber >= 19041) { return 'Windows 10 2004'; }
+			if (buildNumber >= 17763) { return 'Windows Server 2019 / Windows 10 1809'; }
+			if (buildNumber >= 14393) { return 'Windows Server 2016'; }
+			return 'Windows build ' + buildNumber;
+		}
+
+		function getHostWindowsVersionSummary(pool) {
+			const hosts = normalizeCollection(pool && pool.SessionHostDetails);
+			const versionCounts = new Map();
+			let hostCount = 0;
+			hosts.forEach((host) => {
+				const label = mapWindowsReleaseLabel(host && host.OsVersion);
+				if (!label) { return; }
+				hostCount += 1;
+				versionCounts.set(label, (versionCounts.get(label) || 0) + 1);
+			});
+			if (!versionCounts.size) {
+				return null;
+			}
+			const orderedVersions = Array.from(versionCounts.entries()).sort((left, right) => {
+				if (right[1] !== left[1]) { return right[1] - left[1]; }
+				return left[0].localeCompare(right[0]);
+			});
+			const [topLabel] = orderedVersions[0];
+			const displayLabel = orderedVersions.length === 1 ? 'Windows Version' : 'Windows Version(s)';
+			if (orderedVersions.length === 1) {
+				return {
+					label: displayLabel,
+					value: topLabel,
+					detail: 'Detected across ' + hostCount + ' session host' + (hostCount === 1 ? '' : 's')
+				};
+			}
+			return {
+				label: displayLabel,
+				value: topLabel,
+				detail: 'Mixed session host versions: ' + orderedVersions.map(([label, count]) => label + ' (' + count + ')').join(', ')
+			};
+		}
+
 		function resolveUnavailableMetricText(key, value, context) {
 			if (!(value === null || value === undefined || value === '')) { return null; }
 			if (!context || typeof context !== 'object') { return null; }
