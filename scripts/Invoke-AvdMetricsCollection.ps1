@@ -267,7 +267,10 @@ param(
 
 	[Parameter(Mandatory = $false)]
 	[AllowEmptyCollection()]
-	[string[]]$ScanStorageAccounts
+	[string[]]$ScanStorageAccounts,
+
+	[Parameter(Mandatory = $false)]
+	[switch]$SkipStorageAccounts
 )
 
 Set-StrictMode -Version Latest
@@ -586,11 +589,12 @@ function Get-StorageAccountInput {
 function Get-StorageAccountByName {
 	<#
 	.SYNOPSIS
-	Searches all accessible subscriptions for storage accounts matching the given names.
+	Searches all accessible subscriptions for storage accounts.
+	When -Names is supplied, only matching storage accounts are returned.
 	Returns an array of objects with SubscriptionId, SubscriptionName, ResourceGroup, and the raw ARM resource.
 	#>
 	param(
-		[Parameter(Mandatory = $true)]
+		[Parameter(Mandatory = $false)]
 		[string[]]$Names,
 
 		[Parameter(Mandatory = $true)]
@@ -598,7 +602,12 @@ function Get-StorageAccountByName {
 	)
 
 	$found = [System.Collections.Generic.List[PSCustomObject]]::new()
-	$nameSet = [System.Collections.Generic.HashSet[string]]::new($Names, [System.StringComparer]::OrdinalIgnoreCase)
+	$useNameFilter = $Names -and @($Names).Count -gt 0
+	$nameSet = if ($useNameFilter) {
+		[System.Collections.Generic.HashSet[string]]::new($Names, [System.StringComparer]::OrdinalIgnoreCase)
+	} else {
+		$null
+	}
 
 	foreach ($sub in $Subscriptions) {
 		try {
@@ -612,7 +621,7 @@ function Get-StorageAccountByName {
 		if (-not $resp -or $resp.StatusCode -ne 200) { continue }
 
 		foreach ($sa in @(($resp.Content | ConvertFrom-Json).value)) {
-			if (-not $nameSet.Contains($sa.name)) { continue }
+			if ($useNameFilter -and -not $nameSet.Contains($sa.name)) { continue }
 			$rgParts = $sa.id -split '/'
 			$rgIdx   = [Array]::IndexOf($rgParts, 'resourceGroups')
 			$rg      = if ($rgIdx -ge 0) { $rgParts[$rgIdx + 1] } else { $null }
@@ -4248,6 +4257,7 @@ function Get-UserLicenseSummary {
 
 	$skuCounts       = @{}  # skuPartNumber -> PSCustomObject { SkuPartNumber, SkuId, ProductName, UserCount }
 	$licensedUserIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+	$userLicensesById = @{}
 	$batchSize       = 20
 	$batchUri        = 'https://graph.microsoft.com/v1.0/$batch'
 
@@ -4272,6 +4282,7 @@ function Get-UserLicenseSummary {
 				# Map response id (1-based) back to the user object ID for this chunk
 				$userId = $chunk[[int]$resp.id - 1]
 				if ($resp.status -eq 200 -and $resp.body.PSObject.Properties['value']) {
+					$userLicenses = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 					foreach ($lic in $resp.body.value) {
 						$skuKey = $lic.skuPartNumber
 						if (-not $skuCounts.ContainsKey($skuKey)) {
@@ -4286,12 +4297,21 @@ function Get-UserLicenseSummary {
 							}
 						}
 						$skuCounts[$skuKey].UserCount++
+						$licenseName = if ($SkuDisplayNameMap -and $SkuDisplayNameMap.ContainsKey($lic.skuPartNumber)) {
+							[string]$SkuDisplayNameMap[$lic.skuPartNumber]
+						} elseif (-not [string]::IsNullOrWhiteSpace([string]$lic.skuPartNumber)) {
+							[string]$lic.skuPartNumber
+						} else { $null }
+						if (-not [string]::IsNullOrWhiteSpace($licenseName)) {
+							$userLicenses.Add($licenseName) | Out-Null
+						}
 						# Mark user as AVD-licensed if this SKU grants entitlement
 						if ($avdEligibleSkus.Contains($lic.skuPartNumber) -or
 						    $lic.skuPartNumber -match '^CPC_') {
 							$licensedUserIds.Add($userId) | Out-Null
 						}
 					}
+					$userLicensesById[$userId] = @($userLicenses | Sort-Object)
 				}
 			}
 		}
@@ -4308,12 +4328,14 @@ function Get-UserLicenseSummary {
 	$unlicensedUsers = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 	foreach ($id in $unlicensedIds) {
-		$userResp = Invoke-GraphGet -Uri "https://graph.microsoft.com/v1.0/users/$($id)?`$select=id,userPrincipalName" -GraphToken $GraphToken
+		$userResp = Invoke-GraphGet -Uri "https://graph.microsoft.com/v1.0/users/$($id)?`$select=id,displayName,userPrincipalName" -GraphToken $GraphToken
 		$upn = if ($userResp) {
 			$raw = $userResp.userPrincipalName
 			if (-not [string]::IsNullOrEmpty([string]$raw)) { [string]$raw } else { $null }
 		} else { $null }
-		$unlicensedUsers.Add([PSCustomObject]@{ ObjectId = $id; UserPrincipalName = $upn })
+		$displayName = if ($userResp -and -not [string]::IsNullOrWhiteSpace([string]$userResp.displayName)) { [string]$userResp.displayName } else { $null }
+		$licenses = if ($userLicensesById.ContainsKey($id)) { @($userLicensesById[$id]) } else { @() }
+		$unlicensedUsers.Add([PSCustomObject]@{ ObjectId = $id; DisplayName = $displayName; UserPrincipalName = $upn; Licenses = $licenses })
 	}
 
 	# Filter to only AVD-relevant SKUs — access entitlements, Office suites, and
@@ -5625,7 +5647,12 @@ try {
 	$script:_progressStep  = 0
 	$script:_progressTotal = 0
 	$storageResults = @()
-	if ($PSBoundParameters.ContainsKey('ScanStorageAccounts')) {
+
+	if ($SkipStorageAccounts.IsPresent) {
+		Write-Rule 'STORAGE ACCOUNT SCAN'
+		Write-Host '  Storage account scanning skipped by -SkipStorageAccounts.' -ForegroundColor DarkYellow
+	}
+	elseif ($PSBoundParameters.ContainsKey('ScanStorageAccounts')) {
 		# Resolve the list of names: outer @() prevents pipeline unwrapping of single-element arrays
 		$_saNames = @(if ($ScanStorageAccounts -and @($ScanStorageAccounts).Count -gt 0) {
 			$ScanStorageAccounts
@@ -5718,6 +5745,97 @@ try {
 			Write-Host '  No storage account names provided — skipping scan.' -ForegroundColor DarkYellow
 		}
 	}
+	else {
+		Write-Rule 'STORAGE ACCOUNT SCAN'
+		Write-CheckStart 'Locating Storage Accounts'
+		$_saResources = @(Get-StorageAccountByName -Subscriptions $subscriptions)
+		if ($_saResources.Count -eq 0) {
+			Write-CheckResult 'Failed' "No storage accounts found across $(@($subscriptions).Count) subscription(s)"
+		} else {
+			$_saMatches = [System.Collections.Generic.List[PSCustomObject]]::new()
+			foreach ($_saEntry in $_saResources) {
+				$_saInfo = Get-StorageAccountFSLogixInfo -StorageAccount $_saEntry -VaultCache $vaultCache
+				if ($_saInfo.FileShareCount -le 0) { continue }
+				$_saMatches.Add([PSCustomObject]@{
+					StorageAccount = $_saEntry
+					Info           = $_saInfo
+				})
+			}
+
+			if ($_saMatches.Count -eq 0) {
+				Write-CheckResult 'Skipped' "Found $($_saResources.Count) storage account(s) but none contained Azure Files shares"
+			} else {
+				Write-CheckResult 'Success' "$($_saMatches.Count) of $($_saResources.Count) storage account(s) contain Azure Files shares"
+
+				$_saIdx = 0
+				foreach ($_saMatch in $_saMatches) {
+					$_saIdx++
+					$_saEntry = $_saMatch.StorageAccount
+					$_saInfo  = $_saMatch.Info
+					$_saName  = $_saEntry.Resource.name
+					$_bar     = '─' * 66
+					Write-Host ''
+					Write-Host "  `e[90m$_bar`e[0m"
+					Write-Host "  `e[1m`e[97mSTORAGE ACCOUNT [$_saIdx/$($_saMatches.Count)]`e[0m  `e[96m$_saName`e[0m"
+					Write-Host "  `e[90mSubscription : $($_saEntry.SubscriptionName)  |  RG : $($_saEntry.ResourceGroup)  |  Region : $($_saEntry.Resource.location)`e[0m"
+					Write-Host "  `e[90m$_bar`e[0m"
+					Write-CheckStart 'Storage Account Details'
+					$_skuStr = "$($_saInfo.Sku)  ($($_saInfo.ReplicationType))"
+					Write-CheckResult 'Success' "SKU: $_skuStr  |  Kind: $($_saInfo.Kind)  |  Shares: $($_saInfo.FileShareCount)"
+
+					Write-CheckStart 'Security'
+					$_secDetail = "Access Keys: $(if ($_saInfo.AccessKeysEnabled) { 'Enabled' } else { 'Disabled' })  |  " +
+					              "Encryption: $($_saInfo.EncryptionType)  |  " +
+					              "Public Access: $($_saInfo.PublicNetworkAccess)"
+					Write-CheckResult 'Success' $_secDetail
+
+					Write-CheckStart 'Network'
+					$_netDetail = "Default Action: $($_saInfo.NetworkDefaultAction)  |  Private Endpoints: $($_saInfo.PrivateEndpointCount)"
+					Write-CheckResult 'Success' $_netDetail
+
+					Write-CheckStart 'Identity Auth'
+					if ($null -ne $_saInfo.IdentityBasedAuth -and $_saInfo.IdentityBasedAuth.DirectoryServiceOptions -ne 'None') {
+						$_idType   = $_saInfo.IdentityBasedAuth.DirectoryServiceOptions
+						$_idPerm   = if ($_saInfo.IdentityBasedAuth.DefaultSharePermission) { "Default Permission: $($_saInfo.IdentityBasedAuth.DefaultSharePermission)" } else { 'No default permission' }
+						$_idDomain = if ($_saInfo.IdentityBasedAuth.DomainName) { "  |  Domain: $($_saInfo.IdentityBasedAuth.DomainName)" } else { '' }
+						Write-CheckResult 'Success' "Type: $_idType  |  $_idPerm$_idDomain"
+					} else {
+						Write-CheckResult 'Skipped' 'Identity-based access not configured'
+					}
+
+					Write-CheckStart 'SMB / File Service'
+					$_smbMulti   = if ($null -ne $_saInfo.FileService.SmbMultichannel) { "Multichannel: $(if ($_saInfo.FileService.SmbMultichannel) { 'Enabled' } else { 'Disabled' })" } else { 'Multichannel: N/A' }
+					$_softDel    = "Soft Delete: $(if ($_saInfo.FileService.SoftDeleteEnabled) { "Yes ($($_saInfo.FileService.SoftDeleteRetainDays)d)" } else { 'No' })"
+					Write-CheckResult 'Success' "$_smbMulti  |  $_softDel"
+
+					if ($_saInfo.FileShareCount -gt 0) {
+						Write-Host ''
+						Write-Host '      File Shares:' -ForegroundColor DarkGray
+						foreach ($_share in $_saInfo.FileShares) {
+							$_tierLabel = if ($_share.Tier) { " `e[90m[$($_share.Tier)]`e[0m" } else { '' }
+							Write-Host "        `e[97m$($_share.Name)`e[0m$_tierLabel"
+							$_col = '          '
+							$_provStr = if ($null -ne $_share.ProvisionedSizeGb) { "$($_share.ProvisionedSizeGb) GB" } else { 'N/A' }
+							$_usedStr = if ($null -ne $_share.UsedSizeGb) { "$($_share.UsedSizeGb) GB ($($_share.UsedPercent)% used)" } elseif (-not $_share.UsageStatsAvailable) { 'N/A (Premium tier)' } else { 'N/A' }
+							Write-Host "${_col}`e[90mProvisioned  :`e[0m  $_provStr"
+							Write-Host "${_col}`e[90mUsed         :`e[0m  $_usedStr"
+							if ($null -ne $_share.ProvisionedIops) {
+								Write-Host "${_col}`e[90mIOPS         :`e[0m  $($_share.ProvisionedIops)"
+							}
+							if ($null -ne $_share.ProvisionedBandwidthMiBps) {
+								Write-Host "${_col}`e[90mBandwidth    :`e[0m  $($_share.ProvisionedBandwidthMiBps) MiB/s"
+							}
+							$_bakStr = if ($_share.BackupEnabled) { "`e[92m✓ Enabled`e[0m" } else { "`e[90m✗ Disabled`e[0m" }
+							Write-Host "${_col}`e[90mBackup       :`e[0m  $_bakStr"
+						}
+					}
+
+					$storageResults += $_saInfo
+				}
+			}
+		}
+	}
+
 
 	$exportObject = [PSCustomObject]@{
 		CustomerAbbreviation    = $customerCode
@@ -5749,6 +5867,7 @@ try {
 			LocalDiscoveryTimeout = $LocalDiscoveryTimeout
 			OutputDirectory       = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $null } else { $OutputDirectory }
 			ScanStorageAccounts   = if ($ScanStorageAccounts -and $ScanStorageAccounts.Count -gt 0) { $ScanStorageAccounts } else { $null }
+			SkipStorageAccounts   = $SkipStorageAccounts.IsPresent
 		}
 		SubscriptionCount       = @($subscriptions).Count
 		HostPoolCount           = $hostPools.Count
