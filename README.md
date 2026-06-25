@@ -1,15 +1,20 @@
 # AVD Discovery Toolset
 
-Two read-only PowerShell scripts for assessing AVD environments. No Azure resources are modified.
-
+Two read-only PowerShell collectors plus a shared HTML report generator for assessing AVD environments.
 | Script | Runs on | Output |
 |---|---|---|
-| `scripts/Invoke-AvdMetricsCollection.ps1` | Local machine | `output/avd-metrics/<customer>-avd-metrics-<timestamp>.json` plus a sibling `.html` report |
+| `scripts/Invoke-AvdMetricsCollection.ps1` | Local machine | `output/avd-metrics/<customer>-avd-metrics-<timestamp>.json` plus a sibling `.html` report rendered by the shared HTML generator |
 | `scripts/Invoke-AvdSessionHostAudit.ps1` | AVD session host | ZIP archive beside the script when run portably; the generated JSON, logs, and optional `.html` report are cleaned up after archiving, while the transcript is kept only when the run fails |
 
-`Invoke-HtmlReportGenerator.ps1` is portable too: it uses a local `scripts/reporting` folder when present, and if the renderer bundle is missing it downloads and caches the renderer assets from this repository's raw GitHub URLs before generating HTML. When run portably without `-OutputPath`, it writes the HTML into the same `scripts/<customer>-audit-results/` folder.
+## Shared HTML Reporting
 
-`Invoke-AvdMetricsCollection.ps1` can run `Invoke-AvdSessionHostAudit.ps1` automatically on a live session host via Azure VM Run Command (`-RunLocalDiscovery`).
+`scripts/Invoke-HtmlReportGenerator.ps1` is the shared HTML report generator used by both collectors. It resolves the report type from the JSON payload or an explicit `-ReportType`, then dispatches to the matching renderer module under `scripts/reporting`.
+
+The renderer bundle is portable: if `scripts/reporting` is present beside the generator it uses those local files, and if the bundle is missing it downloads and caches the renderer assets from this repository's raw GitHub URLs before generating HTML. When run portably without `-OutputPath`, it writes the HTML into the same `scripts/<customer>-audit-results/` folder.
+
+The current renderer packs are `AvdMetrics` and `AzureSessionHostAudit`, each backed by a shared shell plus report-specific client script.
+
+`Invoke-AvdMetricsCollection.ps1` can attempt to run `Invoke-AvdSessionHostAudit.ps1` automatically on a live session host via Azure VM Run Command (`-RunLocalDiscovery`).
 
 ---
 
@@ -31,7 +36,7 @@ Enumerates all AVD host pools across one or more subscriptions.
 - Reserved VM Instance matches by SKU and region
 
 **Backup**
-- Azure Backup status for session host VMs (Personal pools only)
+- Azure Backup status for session host VMs (Personal or Entra ID Joined pools only)
 
 **Access & Authorisation**
 - App group and workspace names
@@ -191,6 +196,8 @@ Effective value, source (Group Policy / local WinStation / local RdServer / not 
 | `-OutputDirectory` | string | script folder | Directory for JSON and HTML exports |
 | `-PrimaryApplicationsOnly` | switch | off | Apply stricter application filter |
 | `-NoGpresult` | switch | off | Skip `gpresult /h` HTML report |
+| `-SkipConnectivityChecks` | switch | off | Skip the AVD endpoint connectivity tests |
+| `-NoHtml` | switch | off | Skip HTML report generation even when the shared JSON report generator script is available |
 | `-GeneratedBy` | string | *(none)* | Name of the person running the collection; stored in the output JSON |
 | `-ProjectCode` | string | *(none)* | Engagement or project code; stored in the output JSON |
 
