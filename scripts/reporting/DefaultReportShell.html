@@ -2481,6 +2481,9 @@
 			border: 2px dashed #d74c4c;
 			box-shadow: none;
 		}
+		.pool-trend-legend-dot.is-count-series {
+			border-radius: 4px;
+		}
 		.pool-trend-chart {
 			display: block;
 			width: 100%;
@@ -2521,6 +2524,10 @@
 		.pool-trend-axis-label-y {
 			position: absolute;
 			transform: translate(-100%, -50%);
+		}
+		.pool-trend-axis-label-y-right {
+			transform: translate(0, -50%);
+			text-align: left;
 		}
 		.pool-trend-axis-label-x {
 			position: absolute;
@@ -2572,9 +2579,34 @@
 		}
 		.pool-trend-series {
 			filter: drop-shadow(0 4px 10px rgba(15, 23, 32, 0.10));
+			transition: opacity 180ms ease, stroke-width 180ms ease, filter 180ms ease;
+		}
+		.pool-trend-series-group {
+			transition: opacity 180ms ease, filter 180ms ease;
+		}
+		.pool-trend-series-group.is-dimmed {
+			opacity: 0.18;
+			filter: grayscale(0.35);
+		}
+		.pool-trend-series-group.is-active {
+			opacity: 1;
+		}
+		.pool-trend-series-group.is-active .pool-trend-series {
+			filter: drop-shadow(0 6px 14px rgba(15, 23, 32, 0.18));
+		}
+		.pool-trend-series-group.is-active .pool-trend-series-selected {
+			stroke-width: 2.8;
 		}
 		.pool-trend-gap-series {
 			filter: drop-shadow(0 3px 8px rgba(215, 76, 76, 0.16));
+			transition: opacity 180ms ease, stroke-width 180ms ease;
+		}
+		.pool-trend-gap-series.is-dimmed {
+			opacity: 0.18;
+		}
+		.pool-trend-gap-series.is-active {
+			opacity: 1;
+			stroke-width: 2.8;
 		}
 		.pool-trend-guide {
 			stroke: rgba(148, 163, 184, 0.55);
@@ -2587,6 +2619,18 @@
 		}
 		.pool-trend-hitbox:focus {
 			outline: none;
+		}
+		.pool-trend-legend-item-interactive {
+			cursor: pointer;
+		}
+		.pool-trend-legend-item {
+			transition: opacity 180ms ease, color 180ms ease;
+		}
+		.pool-trend-legend-item.is-dimmed {
+			opacity: 0.35;
+		}
+		.pool-trend-legend-item.is-active {
+			color: var(--text-strong, var(--text));
 		}
 		.pool-trend-tooltip {
 			position: absolute;
@@ -3452,6 +3496,11 @@
 			<h2>Storage Account Detail</h2>
 			<p>Operational, network, and file-share groupings for each storage account in this export.</p>
 			<div class="pool-stack" id="storage-account-stack"></div>
+		</section>
+		<section class="section hidden" id="vm-section">
+			<h2>VM Detail</h2>
+			<p>Per-VM discovery, health, network, backup, and metrics detail for scanned virtual machines.</p>
+			<div class="pool-stack" id="vm-stack"></div>
 		</section>
 		<section class="section hidden" id="licensing-section">
 			<h2>Licensing</h2>

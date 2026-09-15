@@ -14,6 +14,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 
 		const data = JSON.parse(decodeUtf8Base64(PAYLOAD_B64));
 		data.HostPools = normalizeCollection(data.HostPools).map(({ BackupInfo, BackupInfoStatus, ...pool }) => pool);
+		data.Vms = normalizeCollection(data.Vms);
 
 		function isPlainObject(value) {
 			return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -999,6 +1000,15 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			return Math.min(100, Math.max(10, Math.ceil(numeric / 10) * 10));
 		}
 
+		function roundTrendCountMaximum(value) {
+			const numeric = toNumber(value);
+			if (numeric === null || numeric <= 0) { return 10; }
+			if (numeric <= 5) { return 5; }
+			const magnitude = Math.pow(10, Math.max(0, String(Math.floor(numeric)).length - 1));
+			const step = Math.max(1, magnitude / 2);
+			return Math.ceil(numeric / step) * step;
+		}
+
 		function createSvgNode(name, attributes) {
 			const node = document.createElementNS('http://www.w3.org/2000/svg', name);
 			Object.entries(attributes || {}).forEach(([key, value]) => {
@@ -1049,7 +1059,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			let startIndex = -1;
 			let endIndex = -1;
 			rows.forEach((row, index) => {
-				if (toNumber(row.cpu) === null && toNumber(row.memory) === null) { return; }
+				if ([row.cpu, row.memory, row.users, row.peak].every((value) => toNumber(value) === null)) { return; }
 				if (startIndex === -1) {
 					startIndex = index;
 				}
@@ -1061,6 +1071,11 @@ const REPORT_TITLE = __REPORT_TITLE__;
 		function formatTrendTooltipValue(value) {
 			const numeric = toNumber(value);
 			return numeric === null ? 'Omitted' : (formatValue(numeric) + '%');
+		}
+
+		function formatTrendTooltipCountValue(value) {
+			const numeric = toNumber(value);
+			return numeric === null ? 'Omitted' : formatValue(numeric);
 		}
 
 		let poolTrendRevealObserver = null;
@@ -1096,18 +1111,30 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			const rows = model.rows;
 			const cpuSeries = model.cpuSeries;
 			const memorySeries = model.memorySeries;
+			const userSeries = model.userSeries;
+			const peakSeries = model.peakSeries;
 			const averageHostsOnPerDay = model.averageHostsOnPerDay;
 			const trendCoverage = getTrendCoverageBounds(rows);
-			const allValues = rows.flatMap((row) => [row.cpu, row.memory]).filter((value) => value !== null);
-			if (!allValues.length) { return null; }
-			const yMax = roundTrendMaximum(Math.max.apply(null, allValues));
+			const percentValues = rows.flatMap((row) => [row.cpu, row.memory]).filter((value) => value !== null);
+			const countValues = rows.flatMap((row) => [row.users, row.peak]).filter((value) => value !== null);
+			if (!percentValues.length && !countValues.length) { return null; }
+			const yMax = percentValues.length ? roundTrendMaximum(Math.max.apply(null, percentValues)) : 100;
+			const countYMax = countValues.length ? roundTrendCountMaximum(Math.max.apply(null, countValues)) : null;
+			const hasUserAxis = countYMax !== null;
 			const width = 720;
 			const height = 132;
-			const margin = { top: 10, right: 18, bottom: 26, left: 42 };
+			const margin = { top: 10, right: hasUserAxis ? 54 : 18, bottom: 26, left: 42 };
 			const plotWidth = width - margin.left - margin.right;
 			const plotHeight = height - margin.top - margin.bottom;
 			const xForIndex = (index) => margin.left + (rows.length <= 1 ? plotWidth / 2 : (index * plotWidth) / (rows.length - 1));
-			const yForValue = (value) => margin.top + plotHeight - ((value / yMax) * plotHeight);
+			const yForPercentValue = (value) => margin.top + plotHeight - ((value / yMax) * plotHeight);
+			const yForCountValue = (value) => margin.top + plotHeight - ((value / countYMax) * plotHeight);
+			const seriesConfigs = [
+				cpuSeries.length ? { key: 'cpu', label: 'CPU', color: '#5ea2ff', axis: 'percent', formatter: formatTrendTooltipValue } : null,
+				memorySeries.length ? { key: 'memory', label: 'Memory', color: '#65c5d8', axis: 'percent', formatter: formatTrendTooltipValue } : null,
+				userSeries.length ? { key: 'users', label: 'Daily Users', color: '#3aae6f', axis: 'count', formatter: formatTrendTooltipCountValue } : null,
+				peakSeries.length ? { key: 'peak', label: 'Peak Users', color: '#f2994a', axis: 'count', formatter: formatTrendTooltipCountValue, dashed: true } : null
+			].filter(Boolean);
 
 			const card = document.createElement('section');
 			card.className = 'pool-trend-card';
@@ -1117,10 +1144,10 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			headText.className = 'pool-trend-head-text';
 			const title = document.createElement('h4');
 			title.className = 'pool-trend-title';
-			title.textContent = 'Daily CPU and Memory Trend';
+			title.textContent = 'Daily Activity and Performance Trend';
 			const copy = document.createElement('p');
 			copy.className = 'pool-trend-copy';
-			copy.textContent = 'Drag the range handles or tap points on the chart to focus the surrounding KPIs on a specific window.';
+			copy.textContent = 'Drag the range handles or tap points on the chart to focus CPU, memory, and user KPIs on a specific window.';
 			headText.append(title, copy);
 			head.append(headText);
 			const selectionPill = document.createElement('div');
@@ -1140,13 +1167,17 @@ const REPORT_TITLE = __REPORT_TITLE__;
 
 			const legend = document.createElement('div');
 			legend.className = 'pool-trend-legend';
-			[
-				cpuSeries.length ? { label: 'CPU', color: '#5ea2ff' } : null,
-				memorySeries.length ? { label: 'Memory', color: '#65c5d8' } : null,
+			seriesConfigs.concat([
 				{ label: 'Omitted Data', color: '#d74c4c', dashed: true }
-			].filter(Boolean).forEach((item) => {
+			]).forEach((item) => {
 				const legendItem = document.createElement('span');
 				legendItem.className = 'pool-trend-legend-item';
+				if (item.key) {
+					legendItem.classList.add('pool-trend-legend-item-interactive');
+					legendItem.setAttribute('tabindex', '0');
+					legendItem.setAttribute('role', 'button');
+					legendItem.setAttribute('aria-label', 'Highlight ' + item.label + ' trend line');
+				}
 				const dot = document.createElement('span');
 				dot.className = 'pool-trend-legend-dot';
 				if (item.dashed) {
@@ -1154,6 +1185,9 @@ const REPORT_TITLE = __REPORT_TITLE__;
 					dot.style.borderColor = item.color;
 				} else {
 					dot.style.background = item.color;
+					if (item.axis === 'count') {
+						dot.classList.add('is-count-series');
+					}
 				}
 				const text = document.createElement('span');
 				text.textContent = item.label;
@@ -1165,7 +1199,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				class: 'pool-trend-chart',
 				viewBox: '0 0 ' + width + ' ' + height,
 				role: 'img',
-				'aria-label': 'Daily CPU and memory trend chart'
+				'aria-label': 'Daily CPU, memory, and user trend chart'
 			});
 			const plot = document.createElement('div');
 			plot.className = 'pool-trend-plot';
@@ -1246,6 +1280,30 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				'clip-path': 'url(#' + selectionClipId + ')'
 			});
 			const missingTrendNodes = [];
+			const seriesNodeGroups = {};
+			const legendItemsBySeries = {};
+			const clearSeriesFocus = () => {
+				Object.keys(seriesNodeGroups).forEach((key) => {
+					seriesNodeGroups[key].forEach((node) => node.classList.remove('is-active', 'is-dimmed'));
+				});
+				Object.keys(legendItemsBySeries).forEach((key) => {
+					if (legendItemsBySeries[key]) {
+						legendItemsBySeries[key].classList.remove('is-active', 'is-dimmed');
+					}
+				});
+			};
+			const applySeriesFocus = (activeKey) => {
+				Object.keys(seriesNodeGroups).forEach((key) => {
+					seriesNodeGroups[key].forEach((node) => node.classList.toggle('is-active', key === activeKey));
+					seriesNodeGroups[key].forEach((node) => node.classList.toggle('is-dimmed', key !== activeKey));
+				});
+				Object.keys(legendItemsBySeries).forEach((key) => {
+					if (legendItemsBySeries[key]) {
+						legendItemsBySeries[key].classList.toggle('is-active', key === activeKey);
+						legendItemsBySeries[key].classList.toggle('is-dimmed', key !== activeKey);
+					}
+				});
+			};
 			const guide = createSvgNode('line', {
 				x1: margin.left,
 				y1: margin.top,
@@ -1256,7 +1314,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 
 			for (let tick = 0; tick <= 4; tick += 1) {
 				const value = (yMax / 4) * tick;
-				const y = yForValue(value);
+				const y = yForPercentValue(value);
 				svg.appendChild(createSvgNode('line', {
 					x1: margin.left,
 					y1: y,
@@ -1270,6 +1328,18 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				label.style.left = ((margin.left - 8) / width * 100).toFixed(2) + '%';
 				label.style.top = ((y / height) * 100).toFixed(2) + '%';
 				yAxis.appendChild(label);
+			}
+			if (hasUserAxis) {
+				for (let tick = 0; tick <= 4; tick += 1) {
+					const value = Math.round((countYMax / 4) * tick);
+					const y = yForCountValue(value);
+					const rightLabel = document.createElement('span');
+					rightLabel.className = 'pool-trend-axis-label pool-trend-axis-label-y pool-trend-axis-label-y-right';
+					rightLabel.textContent = formatValue(value);
+					rightLabel.style.left = (((width - margin.right) + 8) / width * 100).toFixed(2) + '%';
+					rightLabel.style.top = ((y / height) * 100).toFixed(2) + '%';
+					yAxis.appendChild(rightLabel);
+				}
 			}
 			if (trendCoverage.startIndex > 0) {
 				const gapRightX = xForIndex(trendCoverage.startIndex);
@@ -1308,59 +1378,77 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				xAxis.appendChild(label);
 			});
 
-			[
-				{ key: 'cpu', color: '#5ea2ff' },
-				{ key: 'memory', color: '#65c5d8' }
-			].forEach((series) => {
-				buildMissingTrendSegments(rows, series.key, xForIndex, yForValue).forEach((segment) => {
-					missingTrendNodes.push(createSvgNode('path', {
+			seriesConfigs.forEach((series) => {
+				const resolveY = series.axis === 'count' ? yForCountValue : yForPercentValue;
+				const baseGroup = createSvgNode('g', {
+					class: 'pool-trend-series-group',
+					'data-series-key': series.key
+				});
+				const selectedGroup = createSvgNode('g', {
+					class: 'pool-trend-series-group',
+					'data-series-key': series.key
+				});
+				seriesNodeGroups[series.key] = [baseGroup, selectedGroup];
+				buildMissingTrendSegments(rows, series.key, xForIndex, resolveY).forEach((segment) => {
+					const missingNode = createSvgNode('path', {
 						d: segment.d,
 						fill: 'none',
 						stroke: '#d74c4c',
 						'stroke-width': 2.5,
 						'stroke-linecap': 'round',
 						'stroke-dasharray': '6 6',
+						'data-series-key': series.key,
 						class: 'pool-trend-gap-series'
-					}));
+					});
+					seriesNodeGroups[series.key].push(missingNode);
+					missingTrendNodes.push(missingNode);
 				});
-				const path = buildTrendPath(rows, series.key, xForIndex, yForValue);
+				const path = buildTrendPath(rows, series.key, xForIndex, resolveY);
 				if (!path) { return; }
-				baseSeriesLayer.appendChild(createSvgNode('path', {
+				baseGroup.appendChild(createSvgNode('path', {
 					d: path,
 					fill: 'none',
 					stroke: 'currentColor',
-					'stroke-width': 3,
+					'stroke-width': 2.1,
 					'stroke-linecap': 'round',
 					'stroke-linejoin': 'round',
+					'stroke-dasharray': series.dashed ? '8 6' : null,
 					class: 'pool-trend-series pool-trend-series-base'
 				}));
-				selectedSeriesLayer.appendChild(createSvgNode('path', {
+				selectedGroup.appendChild(createSvgNode('path', {
 					d: path,
 					fill: 'none',
 					stroke: series.color,
-					'stroke-width': 3,
+					'stroke-width': 2.1,
 					'stroke-linecap': 'round',
 					'stroke-linejoin': 'round',
+					'stroke-dasharray': series.dashed ? '8 6' : null,
 					class: 'pool-trend-series pool-trend-series-selected'
 				}));
 				rows.forEach((row, index) => {
 					const value = toNumber(row[series.key]);
 					if (value === null) { return; }
-					baseSeriesLayer.appendChild(createSvgNode('circle', {
+					baseGroup.appendChild(createSvgNode('circle', {
 						cx: xForIndex(index),
-						cy: yForValue(value),
-						r: 3.5,
+						cy: resolveY(value),
+						r: 3,
 						fill: 'currentColor',
 						class: 'pool-trend-point pool-trend-point-base'
 					}));
-					selectedSeriesLayer.appendChild(createSvgNode('circle', {
+					selectedGroup.appendChild(createSvgNode('circle', {
 						cx: xForIndex(index),
-						cy: yForValue(value),
-						r: 3.5,
+						cy: resolveY(value),
+						r: 3,
 						fill: series.color,
 						class: 'pool-trend-point pool-trend-point-selected'
 					}));
 				});
+				selectedGroup.addEventListener('mouseenter', () => applySeriesFocus(series.key));
+				selectedGroup.addEventListener('mouseleave', clearSeriesFocus);
+				selectedGroup.addEventListener('focusin', () => applySeriesFocus(series.key));
+				selectedGroup.addEventListener('focusout', clearSeriesFocus);
+				baseSeriesLayer.appendChild(baseGroup);
+				selectedSeriesLayer.appendChild(selectedGroup);
 			});
 			svg.appendChild(baseSeriesLayer);
 			svg.appendChild(selectedSeriesLayer);
@@ -1417,6 +1505,8 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				tooltip.innerHTML = '<strong>' + row.day + '</strong>' +
 					'<span>CPU: ' + formatTrendTooltipValue(row.cpu) + '</span>' +
 					'<span>Memory: ' + formatTrendTooltipValue(row.memory) + '</span>' +
+					(userSeries.length ? ('<span>Daily Users: ' + formatTrendTooltipCountValue(row.users) + '</span>') : '') +
+					(peakSeries.length ? ('<span>Peak Users: ' + formatTrendTooltipCountValue(row.peak) + '</span>') : '') +
 					'<span class="pool-trend-tooltip-note">Click to move the nearest range handle</span>';
 				tooltip.classList.add('is-visible');
 				tooltip.setAttribute('aria-hidden', 'false');
@@ -1530,8 +1620,17 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				hit.addEventListener('blur', hideTooltip);
 				hit.setAttribute('tabindex', '0');
 				hit.setAttribute('role', 'button');
-				hit.setAttribute('aria-label', row.day + ' CPU ' + formatTrendTooltipValue(row.cpu) + ', Memory ' + formatTrendTooltipValue(row.memory));
+				hit.setAttribute('aria-label', row.day + ' CPU ' + formatTrendTooltipValue(row.cpu) + ', Memory ' + formatTrendTooltipValue(row.memory) + (userSeries.length ? (', Daily Users ' + formatTrendTooltipCountValue(row.users)) : '') + (peakSeries.length ? (', Peak Users ' + formatTrendTooltipCountValue(row.peak)) : ''));
 				svg.appendChild(hit);
+			});
+			seriesConfigs.forEach((series) => {
+				const legendItem = Array.from(legend.children).find((child) => child.getAttribute('aria-label') === ('Highlight ' + series.label + ' trend line'));
+				if (!legendItem) { return; }
+				legendItemsBySeries[series.key] = legendItem;
+				legendItem.addEventListener('mouseenter', () => applySeriesFocus(series.key));
+				legendItem.addEventListener('mouseleave', clearSeriesFocus);
+				legendItem.addEventListener('focusin', () => applySeriesFocus(series.key));
+				legendItem.addEventListener('focusout', clearSeriesFocus);
 			});
 
 			plot.append(svg, yAxis, xAxis);
@@ -2801,6 +2900,230 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			});
 		}
 
+		function buildVmSections() {
+			const vms = normalizeCollection(data.Vms);
+			if (!vms.length) { return; }
+			const section = document.getElementById('vm-section');
+			const stack = document.getElementById('vm-stack');
+			if (!section || !stack) { return; }
+			section.classList.remove('hidden');
+			stack.innerHTML = '';
+			vms.forEach((vm, index) => {
+				const panel = document.createElement('article');
+				panel.className = 'pool-panel vm-panel';
+				const anchor = document.createElement('span');
+				anchor.id = 'vm-' + slugifyNavLabel((vm && vm.Name ? vm.Name : 'vm-' + (index + 1)));
+				anchor.className = 'pool-panel-anchor';
+				panel.dataset.anchorId = anchor.id;
+
+				const titleWrap = document.createElement('div');
+				titleWrap.className = 'pool-title-wrap';
+				const header = document.createElement('div');
+				header.className = 'pool-header';
+				const title = document.createElement('h3');
+				title.textContent = vm && vm.Name ? vm.Name : ('VM ' + (index + 1));
+				titleWrap.append(title);
+
+				const highlights = createChipList([
+					{ label: 'Location', value: vm.Location, rawValue: vm.Location },
+					{ label: 'Subscription', value: vm.SubscriptionName, rawValue: vm.SubscriptionName },
+					{ label: 'Resource Group', value: vm.ResourceGroup, rawValue: vm.ResourceGroup }
+				], 'pool-highlights');
+				header.append(titleWrap, highlights);
+
+				const meta = createChipList([
+					{ label: 'SKU', value: vm.VmSize },
+					{ label: 'Cores', value: vm.VmCores },
+					{ label: 'Memory', value: vm.VmMemoryGb == null ? null : (String(vm.VmMemoryGb) + ' GB') },
+					{ label: 'OS', value: vm.OperatingSystem },
+					{ label: 'Join Type', value: vm.JoinType },
+					{ label: 'Zone', value: vm.AvailabilityZone },
+					{ label: 'Trusted Launch', value: vm.TrustedLaunch }
+				], 'pool-meta');
+
+				const summary = document.createElement('section');
+				summary.className = 'pool-summary-block usage-summary';
+				const summaryTitle = document.createElement('h4');
+				summaryTitle.className = 'pool-summary-title';
+				summaryTitle.textContent = 'VM Summary';
+				const summaryGrid = document.createElement('div');
+				summaryGrid.className = 'pool-grid usage-summary-grid';
+				[
+					createMetricCard('Agent Status', vm.AgentStatus || 'n/a', 'Azure platform power state and agent availability'),
+					createMetricCard('Agent Version', vm.AgentVersion || 'n/a', 'Guest agent version reported by instance view'),
+					createMetricCard('Backup', vm.BackupStatus || 'n/a', 'Azure Backup protection state'),
+					createMetricCard('ASR', vm.AsrStatus || 'n/a', 'Azure Site Recovery protection state')
+				].forEach((card) => summaryGrid.appendChild(card));
+				summary.append(summaryTitle, summaryGrid);
+
+				const performance = document.createElement('section');
+				performance.className = 'pool-summary-block performance-envelope';
+				const performanceTitle = document.createElement('h4');
+				performanceTitle.className = 'pool-summary-title';
+				performanceTitle.textContent = 'CPU / Memory Graph';
+				const vmTrendModel = buildVmTrendModel(vm);
+				const vmTrend = vmTrendModel ? createVmPerformanceTrend(vmTrendModel) : null;
+				const performanceGrid = document.createElement('div');
+				performanceGrid.className = 'pool-grid performance-envelope-grid';
+				performanceGrid.appendChild(createMetricCard('CPU Average', vm.CpuAverage, 'Mean CPU usage across the selected window'));
+				performanceGrid.appendChild(createMetricCard('CPU P95', vm.CpuP95, '95th percentile CPU usage across the selected window'));
+				performanceGrid.appendChild(createMetricCard('Memory Average', vm.AvgMemUsedPercent, 'Mean memory usage across the selected window'));
+				performanceGrid.appendChild(createMetricCard('Memory P95', vm.P95MemUsedPercent, '95th percentile memory usage across the selected window'));
+				performance.append(performanceTitle, performanceGrid);
+				if (vmTrend) { performance.appendChild(vmTrend); }
+
+				const details = document.createElement('div');
+				details.className = 'pool-details';
+				const createStaticVmSection = (label, content, className) => {
+					if (content === null || content === undefined) { return null; }
+					const block = document.createElement('section');
+					block.className = 'pool-detail-static' + (className ? (' ' + className) : '');
+					const heading = document.createElement('h4');
+					heading.className = 'pool-detail-static-title';
+					heading.textContent = label;
+					block.appendChild(heading);
+					block.appendChild(renderStructuredValue(content, 0));
+					return block;
+				};
+				const network = createStaticVmSection('Network', vm.Network, 'vm-network-detail');
+				if (network) { details.appendChild(network); }
+				const vmDetails = createStaticVmSection('Details', {
+					Hostname: vm.JoinDirectory,
+					OperatingSystem: vm.OperatingSystem,
+					OperatingSystemType: vm.OperatingSystemType,
+					JoinType: vm.JoinType,
+					BackupStatus: vm.BackupStatus,
+					AsrStatus: vm.AsrStatus
+				}, 'vm-details');
+				if (vmDetails) { details.appendChild(vmDetails); }
+				const extensions = createStaticVmSection('Installed Extensions', vm.InstalledExtensions, 'vm-extensions-detail');
+				if (extensions) { details.appendChild(extensions); }
+
+				panel.append(header, meta, summary, performance, details);
+				stack.append(anchor, panel);
+			});
+		}
+
+		function buildVmTrendModel(vm) {
+			const cpuSeries = parseDailyMetricSeries(vm && vm.CpuDailyBreakdown, 'AvgCpuPercent');
+			const memorySeries = parseDailyMetricSeries(vm && vm.MemoryDailyBreakdown, 'AvgMemUsedPercent');
+			const daySet = new Set();
+			[cpuSeries, memorySeries].forEach((series) => {
+				series.forEach((item) => daySet.add(item.day));
+			});
+			const days = expandTrendDays(Array.from(daySet).sort((left, right) => left.localeCompare(right)));
+			if (!days.length) { return null; }
+			const createSeriesMap = (series) => new Map(series.map((item) => [item.day, item.value]));
+			const cpuMap = createSeriesMap(cpuSeries);
+			const memoryMap = createSeriesMap(memorySeries);
+			return {
+				rows: days.map((day) => ({
+					day,
+					cpu: cpuMap.has(day) ? cpuMap.get(day) : null,
+					memory: memoryMap.has(day) ? memoryMap.get(day) : null
+				})),
+				cpuSeries,
+				memorySeries,
+				averageHostsOnPerDay: null
+			};
+		}
+
+		function createVmPerformanceTrend(model) {
+			if (!model || !model.rows.length) { return null; }
+			const rows = model.rows;
+			const allValues = rows.flatMap((row) => [row.cpu, row.memory]).filter((value) => value !== null);
+			if (!allValues.length) { return null; }
+			const yMax = roundTrendMaximum(Math.max.apply(null, allValues));
+			const width = 720;
+			const height = 132;
+			const margin = { top: 10, right: 18, bottom: 26, left: 42 };
+			const plotWidth = width - margin.left - margin.right;
+			const plotHeight = height - margin.top - margin.bottom;
+			const xForIndex = (index) => margin.left + (rows.length <= 1 ? plotWidth / 2 : (index * plotWidth) / (rows.length - 1));
+			const yForValue = (value) => margin.top + plotHeight - ((value / yMax) * plotHeight);
+			const card = document.createElement('section');
+			card.className = 'pool-trend-card';
+			const head = document.createElement('div');
+			head.className = 'pool-trend-head';
+			const headText = document.createElement('div');
+			headText.className = 'pool-trend-head-text';
+			const title = document.createElement('h4');
+			title.className = 'pool-trend-title';
+			title.textContent = 'Daily CPU and Memory Trend';
+			const copy = document.createElement('p');
+			copy.className = 'pool-trend-copy';
+			copy.textContent = 'VM performance metrics across the selected reporting window.';
+			headText.append(title, copy);
+			head.append(headText);
+			const legend = document.createElement('div');
+			legend.className = 'pool-trend-legend';
+			[{ label: 'CPU', color: '#5ea2ff' }, { label: 'Memory', color: '#65c5d8' }].forEach((item) => {
+				const legendItem = document.createElement('span');
+				legendItem.className = 'pool-trend-legend-item';
+				const dot = document.createElement('span');
+				dot.className = 'pool-trend-legend-dot';
+				dot.style.background = item.color;
+				const text = document.createElement('span');
+				text.textContent = item.label;
+				legendItem.append(dot, text);
+				legend.appendChild(legendItem);
+			});
+			const svg = createSvgNode('svg', {
+				class: 'pool-trend-chart',
+				viewBox: '0 0 ' + width + ' ' + height,
+				role: 'img',
+				'aria-label': 'Daily CPU and memory trend chart'
+			});
+			const plot = document.createElement('div');
+			plot.className = 'pool-trend-plot';
+			const yAxis = document.createElement('div');
+			yAxis.className = 'pool-trend-y-axis';
+			const xAxis = document.createElement('div');
+			xAxis.className = 'pool-trend-x-axis';
+			for (let tick = 0; tick <= 4; tick += 1) {
+				const value = (yMax / 4) * tick;
+				const y = yForValue(value);
+				svg.appendChild(createSvgNode('line', {
+					x1: margin.left,
+					y1: y,
+					x2: width - margin.right,
+					y2: y,
+					class: 'pool-trend-grid-line'
+				}));
+				const label = document.createElement('span');
+				label.className = 'pool-trend-axis-label pool-trend-axis-label-y';
+				label.textContent = Math.round(value) + '%';
+				label.style.left = ((margin.left - 8) / width * 100).toFixed(2) + '%';
+				label.style.top = ((y / height) * 100).toFixed(2) + '%';
+				yAxis.appendChild(label);
+			}
+			const xLabelIndexes = rows.length <= 6 ? rows.map((_, index) => index) : Array.from(new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1]));
+			xLabelIndexes.forEach((index) => {
+				const x = xForIndex(index);
+				const label = document.createElement('span');
+				label.className = 'pool-trend-axis-label pool-trend-axis-label-x';
+				label.textContent = rows[index].day.slice(5);
+				label.style.left = ((x / width) * 100).toFixed(2) + '%';
+				xAxis.appendChild(label);
+			});
+			[{ key: 'cpu', color: '#5ea2ff' }, { key: 'memory', color: '#65c5d8' }].forEach((series) => {
+				const path = buildTrendPath(rows, series.key, xForIndex, yForValue);
+				if (!path) { return; }
+				svg.appendChild(createSvgNode('path', {
+					d: path,
+					fill: 'none',
+					stroke: series.color,
+					'stroke-width': 3,
+					'stroke-linecap': 'round',
+					'stroke-linejoin': 'round',
+					class: 'pool-trend-series pool-trend-series-selected'
+				}));
+			});
+			plot.append(svg, yAxis, xAxis);
+			card.append(head, legend, plot);
+			return card;
+		}
+
 		function buildTable(sectionIdPrefix, title, copy, rows, preferredKeys, options) {
 			if (!rows.length) { return; }
 			document.getElementById(sectionIdPrefix + '-section').classList.remove('hidden');
@@ -2874,7 +3197,7 @@ const REPORT_TITLE = __REPORT_TITLE__;
 				dataGrid.innerHTML = '';
 			}
 			const skip = kind === 'metrics'
-				? new Set(['CustomerAbbreviation', 'GeneratedBy', 'ProjectCode', 'CollectedAt', 'MetricPeriodStart', 'MetricPeriodEnd', 'LookbackDays', 'ExcludeWeekends', 'PeakHoursOnly', 'UtcOffsetHours', 'HostPools', 'StorageAccountScan', 'CommandOptions', 'AuthenticatedIdentity', 'LicenseSummaryStatus', 'LicenseSummary', 'LicenseSummaryUserCount', 'UnlicensedUserCount', 'UnlicensedUsers', '__ExecutionContext', '__Authentication', '__Licensing', 'ArmCallStats', 'HostPoolCount', 'HtmlGeneration', 'ReportType', 'SubscriptionCount'])
+				? new Set(['CustomerAbbreviation', 'GeneratedBy', 'ProjectCode', 'CollectedAt', 'MetricPeriodStart', 'MetricPeriodEnd', 'LookbackDays', 'ExcludeWeekends', 'PeakHoursOnly', 'UtcOffsetHours', 'HostPools', 'Vms', 'StorageAccountScan', 'CommandOptions', 'AuthenticatedIdentity', 'LicenseSummaryStatus', 'LicenseSummary', 'LicenseSummaryUserCount', 'UnlicensedUserCount', 'UnlicensedUsers', '__ExecutionContext', '__Authentication', '__Licensing', 'ArmCallStats', 'HostPoolCount', 'VmScanCount', 'HtmlGeneration', 'ReportType', 'SubscriptionCount'])
 				: new Set(['Applications', 'CustomerAbbreviation', 'GeneratedBy', 'ProjectCode', 'CollectedAt', 'CollectionMode', 'RunningAsAccount', 'DiscoveryType', 'PrimaryApplicationsOnly', 'ApplicationCount']);
 			orderedSectionEntries(kind, data).forEach(([key, value]) => {
 				if (skip.has(key)) { return; }
@@ -2921,11 +3244,12 @@ const REPORT_TITLE = __REPORT_TITLE__;
 			if (kind === 'metrics') {
 				const reportType = metricsReportType();
 				const hostPoolColumns = reportType.key === 'basic'
-					? ['Name', 'SubscriptionName', 'Location', 'HostPoolType', 'HostCount', 'AuthorizedUserCount']
-					: ['Name', 'SubscriptionName', 'Location', 'HostPoolType', 'HostCount', 'AuthorizedUserCount', 'DailyAverageUsers', 'PeakConcurrentSessions', 'AvgCpuPercent', 'AvgMemUsedPercent'];
+					? ['Name', 'SubscriptionName', 'Location', 'AvailabilityZones', 'HostPoolType', 'HostCount', 'AuthorizedUserCount']
+					: ['Name', 'SubscriptionName', 'Location', 'AvailabilityZones', 'HostPoolType', 'HostCount', 'AuthorizedUserCount', 'DailyAverageUsers', 'PeakConcurrentSessions', 'AvgCpuPercent', 'AvgMemUsedPercent'];
 				buildTable('primary-table', 'Host Pools', 'Per-pool operational, usage, and access summary.', normalizeCollection(data.HostPools), hostPoolColumns, { hiddenColumns: ['Tags'] });
 				buildTable('secondary-table', 'Storage Accounts', 'Per-account storage overview; detailed share and network panels are shown below.', normalizeCollection(data.StorageAccountScan), ['Name', 'SubscriptionName', 'ResourceGroup', 'Location', 'Kind', 'FileShareCount', 'PrivateEndpointCount'], { structuredDetailRows: false, hiddenColumns: ['Sku', 'SkuTier', 'ReplicationType', 'AccessKeysEnabled', 'EncryptionType', 'CmkKeyVaultUri', 'PublicNetworkAccess', 'NetworkDefaultAction', 'NetworkBypass', 'HttpsOnly', 'MinimumTlsVersion', 'PrivateEndpoints', 'IdentityBasedAuth', 'FileService', 'FileShares'] });
 				buildHostPoolSections();
+				buildVmSections();
 				buildStorageAccountSections();
 				buildLicensingSection();
 			} else if (kind === 'host') {

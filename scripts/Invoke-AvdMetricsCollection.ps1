@@ -136,6 +136,14 @@ environment.
 Skips HTML report generation for the metrics export and any locally saved session host audit
 JSON retrieved during -RunLocalDiscovery.
 
+.PARAMETER ScanVMs
+When specified, scans Azure VMs in the selected subscriptions and emits a VM report section.
+Use -ScanVMName to restrict the scan to one or more named VMs.
+
+.PARAMETER ScanVMName
+Optional VM name filter for -ScanVMs. When omitted, all accessible VMs in the selected
+subscriptions are scanned.
+
 .PARAMETER InlineLocalScript
 When specified alongside -RunLocalDiscovery, embeds Invoke-AvdSessionHostAudit.ps1 and
 config/appExclusions.config.json directly into the Run Command payload instead of
@@ -248,6 +256,13 @@ param(
 
 	[Parameter(Mandatory = $false)]
 	[switch]$NoHtml,
+
+	[Parameter(Mandatory = $false)]
+	[switch]$ScanVMs,
+
+	[Parameter(Mandatory = $false)]
+	[Alias('ScanVM')]
+	[string[]]$ScanVMName,
 
 	[Parameter(Mandatory = $false)]
 	[switch]$InlineLocalScript,
@@ -576,6 +591,32 @@ function Get-StorageAccountInput {
 	$names = [System.Collections.Generic.List[string]]::new()
 	while ($true) {
 		$line = (Read-Host '  Storage account name').Trim()
+		if ([string]::IsNullOrWhiteSpace($line)) { break }
+		foreach ($part in ($line -split '[,\s]+')) {
+			$part = $part.Trim()
+			if (-not [string]::IsNullOrEmpty($part)) { $names.Add($part) }
+		}
+	}
+	Write-Host ''
+	return $names.ToArray()
+}
+
+function Get-VmInput {
+	<#
+	.SYNOPSIS
+	Prompts for VM names interactively when -ScanVMs is present but -ScanVMName
+	was not supplied on the command line.
+	Accepts a comma- or newline-separated list; blank input ends the prompt.
+	#>
+	Write-Host ''
+	Write-Host '  Enter the VM name(s) to scan.' -ForegroundColor Cyan
+	Write-Host '  You may enter one per line, or separate multiple with commas.' -ForegroundColor DarkGray
+	Write-Host '  Press Enter on a blank line when done.' -ForegroundColor DarkGray
+	Write-Host ''
+
+	$names = [System.Collections.Generic.List[string]]::new()
+	while ($true) {
+		$line = (Read-Host '  VM name').Trim()
 		if ([string]::IsNullOrWhiteSpace($line)) { break }
 		foreach ($part in ($line -split '[,\s]+')) {
 			$part = $part.Trim()
@@ -2754,6 +2795,297 @@ function Get-VmSizeMemoryGbMap {
 	catch { <# Return empty map — memory % will report NoSkuData #> }
 
 	return $map
+}
+
+function Get-VmSizeDetailsMap {
+	<#
+	.SYNOPSIS
+	Returns a hashtable mapping VM size name to core count and memory in GB for a given subscription and location.
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$SubscriptionId,
+
+		[Parameter(Mandatory = $true)]
+		[string]$Location
+	)
+
+	$map = @{}
+	try {
+		$path = "/subscriptions/$SubscriptionId/providers/Microsoft.Compute/locations/$Location/vmSizes?api-version=2021-07-01"
+		$resp = Invoke-ArmRequest -Path $path -Method GET -ErrorAction Stop
+		if ($resp.StatusCode -eq 200) {
+			foreach ($size in ($resp.Content | ConvertFrom-Json).value) {
+				if (-not $map.ContainsKey($size.name)) {
+					$coreCount = $null
+					foreach ($propertyName in @('numberOfCores', 'vCPUs', 'vCpus', 'cores')) {
+						if ($size.PSObject.Properties[$propertyName] -and $null -ne $size.$propertyName) {
+							$coreCount = [int]$size.$propertyName
+							break
+						}
+					}
+					$memoryGb = if ($size.PSObject.Properties['memoryInMB'] -and $null -ne $size.memoryInMB) {
+						[Math]::Round([double]$size.memoryInMB / 1024, 2)
+					} else {
+						$null
+					}
+					$map[$size.name] = [PSCustomObject]@{
+						CoreCount = $coreCount
+						MemoryGb  = $memoryGb
+					}
+				}
+			}
+		}
+	}
+	catch { <# VM sizing details are best-effort. #> }
+
+	return $map
+}
+
+function Get-VmOperatingSystemFriendlyName {
+	param(
+		[Parameter(Mandatory = $true)]
+		[AllowNull()]
+		[object]$VmData
+	)
+
+	$properties = if ($VmData -and $VmData.PSObject.Properties['properties']) { $VmData.properties } else { $null }
+	if (-not $properties) { return 'Unknown' }
+
+	$storageProfile = if ($properties.PSObject.Properties['storageProfile']) { $properties.storageProfile } else { $null }
+	$osDisk = if ($storageProfile -and $storageProfile.PSObject.Properties['osDisk']) { $storageProfile.osDisk } else { $null }
+	$osType = if ($osDisk -and $osDisk.PSObject.Properties['osType']) { [string]$osDisk.osType } else { $null }
+	$imageReference = if ($storageProfile -and $storageProfile.PSObject.Properties['imageReference']) { $storageProfile.imageReference } else { $null }
+	$publisher = if ($imageReference -and $imageReference.PSObject.Properties['publisher']) { [string]$imageReference.publisher } else { $null }
+	$offer = if ($imageReference -and $imageReference.PSObject.Properties['offer']) { [string]$imageReference.offer } else { $null }
+	$sku = if ($imageReference -and $imageReference.PSObject.Properties['sku']) { [string]$imageReference.sku } else { $null }
+	$imageText = (($publisher, $offer, $sku) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ' '
+
+	if ($osType -eq 'Windows') {
+		if ($imageText -match 'WindowsServer.*2025|2025') { return 'Windows Server 2025' }
+		if ($imageText -match 'WindowsServer.*2022|2022') { return 'Windows Server 2022' }
+		if ($imageText -match 'WindowsServer.*2019|2019') { return 'Windows Server 2019' }
+		if ($imageText -match 'WindowsServer.*2016|2016') { return 'Windows Server 2016' }
+		if (-not [string]::IsNullOrWhiteSpace($sku)) { return "Windows ($sku)" }
+		return 'Windows'
+	}
+
+	if ($osType -eq 'Linux') {
+		if (-not [string]::IsNullOrWhiteSpace($offer)) { return $offer }
+		return 'Linux'
+	}
+
+	if (-not [string]::IsNullOrWhiteSpace($imageText)) { return $imageText.Trim() }
+	if (-not [string]::IsNullOrWhiteSpace($osType)) { return $osType }
+	return 'Unknown'
+}
+
+function Get-VmDiscoveryDetails {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$VmResourceId
+	)
+
+	$vmResp = Invoke-ArmRequest -Path "$($VmResourceId)?`$expand=instanceView&api-version=2024-03-01" -Method GET -ErrorAction SilentlyContinue
+	if (-not $vmResp -or $vmResp.StatusCode -ne 200) { return $null }
+
+	$vmData = $vmResp.Content | ConvertFrom-Json
+	$vmProps = $vmData.properties
+	$size = if ($vmProps.PSObject.Properties['hardwareProfile'] -and $vmProps.hardwareProfile.PSObject.Properties['vmSize']) { [string]$vmProps.hardwareProfile.vmSize } else { $null }
+	$sizeDetails = if ($size -and $script:_vmSizeDetailsMap -and $script:_vmSizeDetailsMap.ContainsKey($size)) { $script:_vmSizeDetailsMap[$size] } else { $null }
+	$instanceView = if ($vmData.PSObject.Properties['instanceView']) { $vmData.instanceView } else { $null }
+	$subscriptionId = [string]([regex]::Match($VmResourceId, '/subscriptions/(?<id>[^/]+)', 'IgnoreCase').Groups['id'].Value)
+	$resourceGroup = [string]([regex]::Match($VmResourceId, '/resourceGroups/(?<rg>[^/]+)', 'IgnoreCase').Groups['rg'].Value)
+
+	$osType = if ($vmProps.PSObject.Properties['storageProfile'] -and $vmProps.storageProfile.PSObject.Properties['osDisk'] -and $vmProps.storageProfile.osDisk.PSObject.Properties['osType']) {
+		[string]$vmProps.storageProfile.osDisk.osType
+	} else { $null }
+	$osFriendly = Get-VmOperatingSystemFriendlyName -VmData $vmData
+	$vmZone = if ($vmData.PSObject.Properties['zones'] -and $vmData.zones) { @($vmData.zones | ForEach-Object { [string]$_ }) -join ', ' } else { $null }
+	$securityType = if ($vmProps.PSObject.Properties['securityProfile'] -and $vmProps.securityProfile -and $vmProps.securityProfile.PSObject.Properties['securityType'] -and -not [string]::IsNullOrWhiteSpace($vmProps.securityProfile.securityType)) {
+		[string]$vmProps.securityProfile.securityType
+	} else { 'Standard' }
+
+	$nicDetails = $null
+	if ($vmProps.PSObject.Properties['networkProfile'] -and $vmProps.networkProfile.PSObject.Properties['networkInterfaces']) {
+		$nicRef = @($vmProps.networkProfile.networkInterfaces | Select-Object -First 1)
+		if ($nicRef -and $nicRef[0].PSObject.Properties['id'] -and -not [string]::IsNullOrWhiteSpace($nicRef[0].id)) {
+			$nicResp = Invoke-ArmRequest -Path "$($nicRef[0].id)?api-version=2023-11-01" -Method GET -ErrorAction SilentlyContinue
+			if ($nicResp -and $nicResp.StatusCode -eq 200) {
+				$nicData = $nicResp.Content | ConvertFrom-Json
+				$nicProps = $nicData.properties
+				$ipCfg = if ($nicProps.PSObject.Properties['ipConfigurations'] -and @($nicProps.ipConfigurations).Count -gt 0) { @($nicProps.ipConfigurations) | Select-Object -First 1 } else { $null }
+				$subnetId = if ($ipCfg -and $ipCfg.PSObject.Properties['properties'] -and $ipCfg.properties.PSObject.Properties['subnet'] -and $ipCfg.properties.subnet.PSObject.Properties['id']) { $ipCfg.properties.subnet.id } else { $null }
+				$subnetName = $null
+				$vnetName = $null
+				$vnetRg = $null
+				$subnetPrefix = $null
+				$subnetNsg = $null
+				$routeTable = $null
+				$vnetDnsServers = @()
+				if (-not [string]::IsNullOrWhiteSpace($subnetId)) {
+					$parts = [string[]]($subnetId -split '/')
+					$rgIdx = [Array]::IndexOf($parts, 'resourceGroups')
+					$vnetIdx = [Array]::IndexOf($parts, 'virtualNetworks')
+					$subnetIdx = [Array]::IndexOf($parts, 'subnets')
+					$vnetRg = if ($rgIdx -ge 0 -and ($rgIdx + 1) -lt $parts.Count) { $parts[$rgIdx + 1] } else { $null }
+					$vnetName = if ($vnetIdx -ge 0 -and ($vnetIdx + 1) -lt $parts.Count) { $parts[$vnetIdx + 1] } else { $null }
+					$subnetName = if ($subnetIdx -ge 0 -and ($subnetIdx + 1) -lt $parts.Count) { $parts[$subnetIdx + 1] } else { $null }
+					$vnetId = $subnetId -replace '/subnets/[^/]+$', ''
+					$vnetResp = Invoke-ArmRequest -Path "$($vnetId)?api-version=2023-11-01" -Method GET -ErrorAction SilentlyContinue
+					if ($vnetResp -and $vnetResp.StatusCode -eq 200) {
+						$vnetData = $vnetResp.Content | ConvertFrom-Json
+						$vnetProps = $vnetData.properties
+						if ($vnetProps.PSObject.Properties['dhcpOptions'] -and $vnetProps.dhcpOptions.PSObject.Properties['dnsServers']) {
+							$vnetDnsServers = @($vnetProps.dhcpOptions.dnsServers)
+						}
+						if ($vnetProps.PSObject.Properties['subnets']) {
+							$subnetData = $vnetProps.subnets | Where-Object { $_.name -ieq $subnetName } | Select-Object -First 1
+							if ($subnetData) {
+								$subnetProps = $subnetData.properties
+								if ($subnetProps.PSObject.Properties['addressPrefix'] -and -not [string]::IsNullOrWhiteSpace([string]$subnetProps.addressPrefix)) {
+									$subnetPrefix = $subnetProps.addressPrefix
+								} elseif ($subnetProps.PSObject.Properties['addressPrefixes'] -and @($subnetProps.addressPrefixes).Count -gt 0) {
+									$subnetPrefix = @($subnetProps.addressPrefixes | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join ', '
+								}
+								if ($subnetProps.PSObject.Properties['networkSecurityGroup'] -and $subnetProps.networkSecurityGroup -and $subnetProps.networkSecurityGroup.PSObject.Properties['id']) {
+									$subnetNsg = $subnetProps.networkSecurityGroup.id
+								}
+								if ($subnetProps.PSObject.Properties['routeTable'] -and $subnetProps.routeTable -and $subnetProps.routeTable.PSObject.Properties['id']) {
+									$routeTable = $subnetProps.routeTable.id
+								}
+							}
+						}
+					}
+				}
+				$nicNsg = if ($nicProps.PSObject.Properties['networkSecurityGroup'] -and $nicProps.networkSecurityGroup -and $nicProps.networkSecurityGroup.PSObject.Properties['id']) { $nicProps.networkSecurityGroup.id } else { $null }
+				$privateIp = if ($ipCfg -and $ipCfg.PSObject.Properties['properties'] -and $ipCfg.properties.PSObject.Properties['privateIPAddress']) { [string]$ipCfg.properties.privateIPAddress } else { $null }
+				$publicIp = $null
+				if ($ipCfg -and $ipCfg.PSObject.Properties['properties'] -and $ipCfg.properties.PSObject.Properties['publicIPAddress'] -and $ipCfg.properties.publicIPAddress -and $ipCfg.properties.publicIPAddress.PSObject.Properties['id']) {
+					$publicIpResp = Invoke-ArmRequest -Path "$($ipCfg.properties.publicIPAddress.id)?api-version=2023-11-01" -Method GET -ErrorAction SilentlyContinue
+					if ($publicIpResp -and $publicIpResp.StatusCode -eq 200) {
+						$publicIpData = $publicIpResp.Content | ConvertFrom-Json
+						$publicIp = if ($publicIpData.PSObject.Properties['properties'] -and $publicIpData.properties.PSObject.Properties['ipAddress']) { $publicIpData.properties.ipAddress } else { $publicIpData.name }
+					}
+				}
+				$attachedTo = if ($vnetName -and $subnetName) { "$vnetName/$subnetName" } else { $null }
+				$nicDetails = [PSCustomObject]@{
+					AttachedTo                 = $attachedTo
+					NicName                    = $nicData.name
+					PrivateIpAddress           = $privateIp
+					PublicIpAddress            = $publicIp
+					VirtualNetworkName         = $vnetName
+					VirtualNetworkResourceGroup = $vnetRg
+					SubnetName                 = $subnetName
+					SubnetPrefix               = $subnetPrefix
+					NicNetworkSecurityGroup     = $nicNsg
+					SubnetNetworkSecurityGroup  = $subnetNsg
+					RouteTable                 = $routeTable
+					DnsServers                 = @($vnetDnsServers)
+					AcceleratedNetworking      = if ($nicProps.PSObject.Properties['enableAcceleratedNetworking']) { [bool]$nicProps.enableAcceleratedNetworking } else { $null }
+				}
+			}
+		}
+	}
+
+	$installedExtensions = [System.Collections.Generic.List[PSCustomObject]]::new()
+	$extTypes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+	try {
+		$extResp = Invoke-ArmRequest -Path "$VmResourceId/extensions?api-version=2024-03-01" -Method GET -ErrorAction SilentlyContinue
+		if ($extResp -and $extResp.StatusCode -eq 200) {
+			foreach ($ext in @(( $extResp.Content | ConvertFrom-Json).value)) {
+				$extProps = if ($ext.PSObject.Properties['properties']) { $ext.properties } else { $null }
+				if (-not $extProps) { continue }
+				$extType = if ($extProps.PSObject.Properties['type'] -and -not [string]::IsNullOrWhiteSpace([string]$extProps.type)) { [string]$extProps.type } else { $null }
+				if (-not $extType) { continue }
+				$extPublisher = if ($extProps.PSObject.Properties['publisher']) { [string]$extProps.publisher } else { $null }
+				$extVersion = if ($extProps.PSObject.Properties['typeHandlerVersion']) { [string]$extProps.typeHandlerVersion } elseif ($extProps.PSObject.Properties['publisherTypeHandlerVersion']) { [string]$extProps.publisherTypeHandlerVersion } else { $null }
+				$installedExtensions.Add([PSCustomObject]@{ Type = $extType; Publisher = $extPublisher; Version = $extVersion }) | Out-Null
+				$extTypes.Add($extType) | Out-Null
+			}
+		}
+	}
+	catch { <# Extension inventory is best-effort. #> }
+
+	$backupStatus = $null
+	$asrStatus = $null
+	try {
+		$vaultResp = Invoke-ArmRequest -Path "/subscriptions/$subscriptionId/providers/Microsoft.RecoveryServices/vaults?api-version=2023-06-01" -Method GET -ErrorAction SilentlyContinue
+		if ($vaultResp -and $vaultResp.StatusCode -eq 200) {
+			foreach ($vault in @($vaultResp.Content | ConvertFrom-Json).value) {
+				$vParts = [string[]]($vault.id -split '/')
+				$rgIdx = [Array]::IndexOf($vParts, 'resourceGroups')
+				$vaultRg = if ($rgIdx -ge 0 -and ($rgIdx + 1) -lt $vParts.Count) { $vParts[$rgIdx + 1] } else { $null }
+				if (-not $vaultRg) { continue }
+
+				$backupPath = "/subscriptions/$subscriptionId/resourceGroups/$vaultRg/providers/Microsoft.RecoveryServices/vaults/$($vault.name)/backupProtectedItems?api-version=2023-06-01&`$filter=backupManagementType eq 'AzureIaasVM'"
+				$backupResp = Invoke-ArmRequest -Path $backupPath -Method GET -ErrorAction SilentlyContinue
+				if ($backupResp -and $backupResp.StatusCode -eq 200 -and -not $backupStatus) {
+					foreach ($item in @(( $backupResp.Content | ConvertFrom-Json).value)) {
+						$p = $item.properties
+						$srcId = if ($p.PSObject.Properties['sourceResourceId']) { [string]$p.sourceResourceId } else { $null }
+						if (-not [string]::IsNullOrWhiteSpace($srcId) -and $srcId -ieq $VmResourceId) {
+							$backupStatus = if ($p.PSObject.Properties['protectionState']) { [string]$p.protectionState } elseif ($p.PSObject.Properties['lastBackupStatus']) { [string]$p.lastBackupStatus } else { 'Protected' }
+							break
+						}
+					}
+				}
+
+				$asrPath = "/subscriptions/$subscriptionId/resourceGroups/$vaultRg/providers/Microsoft.RecoveryServices/vaults/$($vault.name)/replicationProtectedItems?api-version=2025-01-01"
+				$asrResp = Invoke-ArmRequest -Path $asrPath -Method GET -ErrorAction SilentlyContinue
+				if ($asrResp -and $asrResp.StatusCode -eq 200 -and -not $asrStatus) {
+					foreach ($item in @(( $asrResp.Content | ConvertFrom-Json).value)) {
+						$p = $item.properties
+						$srcId = if ($p.PSObject.Properties['sourceResourceId']) { [string]$p.sourceResourceId } else { $null }
+						if (-not [string]::IsNullOrWhiteSpace($srcId) -and $srcId -ieq $VmResourceId) {
+							$asrStatus = if ($p.PSObject.Properties['protectionStateDescription']) { [string]$p.protectionStateDescription } elseif ($p.PSObject.Properties['protectionState']) { [string]$p.protectionState } elseif ($p.PSObject.Properties['replicationHealth']) { [string]$p.replicationHealth } else { 'Protected' }
+							break
+						}
+					}
+				}
+
+				if ($backupStatus -and $asrStatus) { break }
+			}
+		}
+	}
+	catch {
+		$backupStatus = $null
+		$asrStatus = $null
+	}
+
+	$vmName = ($VmResourceId -split '/')[-1]
+	$joinType = if ($extTypes.Contains('JsonADDomainExtension') -and ($extTypes.Contains('AADLoginForWindows') -or $extTypes.Contains('AADLoginForWindowsWithIntune'))) {
+		'HybridAzureADJoined'
+	} elseif ($extTypes.Contains('JsonADDomainExtension')) {
+		'ActiveDirectoryJoined'
+	} elseif ($extTypes.Contains('AADLoginForWindows') -or $extTypes.Contains('AADLoginForWindowsWithIntune')) {
+		'AzureADJoined'
+	} elseif ($vmProps.PSObject.Properties['osProfile'] -and $vmProps.osProfile.PSObject.Properties['computerName']) {
+		'Workgroup'
+	} else {
+		$null
+	}
+	return [PSCustomObject]@{
+		VmData          = $vmData
+		VmName          = $vmName
+		SubscriptionId  = $subscriptionId
+		ResourceGroup    = $resourceGroup
+		VmSize          = $size
+		VmCores         = if ($sizeDetails -and $sizeDetails.PSObject.Properties['CoreCount']) { $sizeDetails.CoreCount } else { $null }
+		VmMemoryGb      = if ($sizeDetails -and $sizeDetails.PSObject.Properties['MemoryGb']) { $sizeDetails.MemoryGb } else { $null }
+		OperatingSystem  = $osFriendly
+		OperatingSystemType = $osType
+		JoinType        = $joinType
+		JoinDirectory   = if ($vmProps.PSObject.Properties['osProfile'] -and $vmProps.osProfile.PSObject.Properties['computerName']) { [string]$vmProps.osProfile.computerName } else { $vmName }
+		BackupStatus    = if ($backupStatus) { $backupStatus } else { 'NotProtected' }
+		AsrStatus       = if ($asrStatus) { $asrStatus } else { 'NotProtected' }
+		AgentStatus     = if ($instanceView -and $instanceView.PSObject.Properties['statuses']) { (@($instanceView.statuses | Where-Object { $_.code -like 'PowerState/*' } | Select-Object -First 1).displayStatus) } else { $null }
+		AgentVersion    = if ($instanceView -and $instanceView.PSObject.Properties['vmAgent'] -and $instanceView.vmAgent -and $instanceView.vmAgent.PSObject.Properties['vmAgentVersion']) { $instanceView.vmAgent.vmAgentVersion } else { $null }
+		AvailabilityZone = $vmZone
+		TrustedLaunch    = $securityType
+		Network          = $nicDetails
+		InstalledExtensions = @($installedExtensions)
+	}
 }
 
 function Get-HostPoolVmMemoryMetrics {
@@ -5439,6 +5771,7 @@ try {
 		Write-CheckResult 'Skipped' 'ms-service-plan-ids.csv not found — ProductName will be null'
 	}
 	$vmSizeMemCache  = @{}  # "subscriptionId/location" -> hashtable of size name -> memory GB
+	$vmSizeDetailsCache = @{}  # "subscriptionId/location" -> hashtable of size name -> core/memory details
 	$appGroupCache   = @{}  # subscriptionId -> all AVD app groups in that subscription
 	$workspaceCache  = @{}  # subscriptionId -> all AVD workspaces in that subscription
 	$vaultCache           = @{}  # subscriptionId -> Recovery Services Vaults in that subscription
@@ -5749,6 +6082,130 @@ try {
 		}
 	}
 
+	$vmScanResults = @()
+	if ($PSBoundParameters.ContainsKey('ScanVMs')) {
+		Write-Rule 'VM SCAN'
+		$_vmNames = if ($PSBoundParameters.ContainsKey('ScanVMName') -and @($ScanVMName).Count -gt 0) { @($ScanVMName) } else { @() }
+		$_vmResources = [System.Collections.Generic.List[PSCustomObject]]::new()
+		if (@($_vmNames).Count -gt 0) {
+			Write-CheckStart 'Locating VMs'
+			foreach ($sub in $subscriptions) {
+				try {
+					Set-AzContext -SubscriptionId $sub.SubscriptionId -WarningAction SilentlyContinue -ErrorAction Stop | Out-Null
+					foreach ($vmName in $_vmNames) {
+						$vmResp = Invoke-ArmRequest -Path "/subscriptions/$($sub.SubscriptionId)/providers/Microsoft.Compute/virtualMachines/$($vmName)?api-version=2024-03-01" -Method GET -ErrorAction SilentlyContinue
+						if ($vmResp -and $vmResp.StatusCode -eq 200) {
+							$_vmResources.Add([PSCustomObject]@{
+								SubscriptionId   = $sub.SubscriptionId
+								SubscriptionName = $sub.Name
+								Resource         = ($vmResp.Content | ConvertFrom-Json)
+							}) | Out-Null
+						}
+					}
+				}
+				catch {
+					Write-Warning "Skipping VM scan in subscription '$($sub.Name)' ($($sub.SubscriptionId)) - unable to set context: $($_.Exception.Message)"
+				}
+			}
+			if ($_vmResources.Count -eq 0) {
+				Write-CheckResult 'Failed' "None of the specified VM(s) found across $(@($subscriptions).Count) subscription(s)"
+			} else {
+				Write-CheckResult 'Success' "$($_vmResources.Count) VM resource(s) found"
+			}
+		} else {
+			Write-CheckStart 'Locating VMs'
+			foreach ($sub in $subscriptions) {
+				try {
+					Set-AzContext -SubscriptionId $sub.SubscriptionId -WarningAction SilentlyContinue -ErrorAction Stop | Out-Null
+					$vmListResp = Invoke-ArmRequest -Path "/subscriptions/$($sub.SubscriptionId)/providers/Microsoft.Compute/virtualMachines?api-version=2024-03-01" -Method GET -ErrorAction SilentlyContinue
+					if ($vmListResp -and $vmListResp.StatusCode -eq 200) {
+						foreach ($vmItem in @(( $vmListResp.Content | ConvertFrom-Json).value)) {
+							$_vmResources.Add([PSCustomObject]@{
+								SubscriptionId   = $sub.SubscriptionId
+								SubscriptionName = $sub.Name
+								Resource         = $vmItem
+							}) | Out-Null
+						}
+					}
+				}
+				catch {
+					Write-Warning "Skipping VM scan in subscription '$($sub.Name)' ($($sub.SubscriptionId)) - unable to enumerate VMs: $($_.Exception.Message)"
+				}
+			}
+			if ($_vmResources.Count -eq 0) {
+				Write-CheckResult 'Skipped' "No VMs found across $(@($subscriptions).Count) subscription(s)"
+			} else {
+				Write-CheckResult 'Success' "$($_vmResources.Count) VM resource(s) found"
+			}
+		}
+
+		if ($_vmResources.Count -gt 0) {
+			$_vmIdx = 0
+			foreach ($_vmEntry in $_vmResources) {
+				$_vmIdx++
+				$_vmName = $_vmEntry.Resource.name
+				$_vmId = $_vmEntry.Resource.id
+				$_vmResourceGroup = if ($_vmId -match '/resourceGroups/(?<rg>[^/]+)') { $Matches['rg'] } elseif ($_vmEntry.Resource.PSObject.Properties['resourceGroup']) { [string]$($_vmEntry.Resource.resourceGroup) } else { $null }
+				$_vmSubId = $_vmEntry.SubscriptionId
+				$_vmSubName = $_vmEntry.SubscriptionName
+				$_vmLocation = $_vmEntry.Resource.location
+				$_bar = '─' * 66
+				Write-Host ''
+				Write-Host "  `e[90m$_bar`e[0m"
+				Write-Host "  `e[1m`e[97mVM [$_vmIdx/$($_vmResources.Count)]`e[0m  `e[96m$_vmName`e[0m"
+				Write-Host "  `e[90mSubscription : $_vmSubName  |  RG : $_vmResourceGroup  |  Region : $_vmLocation`e[0m"
+				Write-Host "  `e[90m$_bar`e[0m"
+				$vmSizeCacheKey = "$_vmSubId/$_vmLocation"
+				if (-not $vmSizeDetailsCache.ContainsKey($vmSizeCacheKey)) {
+					$vmSizeDetailsCache[$vmSizeCacheKey] = Get-VmSizeDetailsMap -SubscriptionId $_vmSubId -Location $_vmLocation
+				}
+				$script:_vmSizeDetailsMap = $vmSizeDetailsCache[$vmSizeCacheKey]
+				$vmDetails = Get-VmDiscoveryDetails -VmResourceId $_vmId
+				if ($vmDetails) {
+					$vmSizeMap = @{ $vmDetails.SubscriptionId = $vmDetails.VmSize }
+					$vmSizeGbMap = @{}
+					if ($null -ne $vmDetails.VmMemoryGb) {
+						$vmSizeGbMap[$vmDetails.VmSize] = $vmDetails.VmMemoryGb
+					}
+					$vmCpuMetrics = Get-HostPoolVmCpuMetrics -VmResourceIds @($_vmId) -StartTime $startTime -EndTime $endTime -ExcludeWeekends:$ExcludeWeekends -PeakHoursOnly:$PeakHoursOnly -UtcOffsetHours $UtcOffsetHours
+					$vmMemMetrics = Get-HostPoolVmMemoryMetrics -VmResourceIds @($_vmId) -VmSizeMap @{ $_vmId.ToLowerInvariant() = $vmDetails.VmSize } -VmSizeMemoryGbMap $vmSizeGbMap -StartTime $startTime -EndTime $endTime -ExcludeWeekends:$ExcludeWeekends -PeakHoursOnly:$PeakHoursOnly -UtcOffsetHours $UtcOffsetHours
+					$vmScanResults += [PSCustomObject]@{
+						Name                = $vmDetails.VmName
+						SubscriptionId      = $vmDetails.SubscriptionId
+						SubscriptionName    = $_vmSubName
+						ResourceGroup       = $vmDetails.ResourceGroup
+						Location            = $_vmLocation
+						VmSize              = $vmDetails.VmSize
+						VmCores             = $vmDetails.VmCores
+						VmMemoryGb          = $vmDetails.VmMemoryGb
+						OperatingSystem     = $vmDetails.OperatingSystem
+						OperatingSystemType = $vmDetails.OperatingSystemType
+						JoinType            = $vmDetails.JoinType
+						JoinDirectory       = $vmDetails.JoinDirectory
+						BackupStatus        = $vmDetails.BackupStatus
+						AsrStatus           = $vmDetails.AsrStatus
+						AgentStatus         = $vmDetails.AgentStatus
+						AgentVersion        = $vmDetails.AgentVersion
+						AvailabilityZone    = $vmDetails.AvailabilityZone
+						TrustedLaunch       = $vmDetails.TrustedLaunch
+						Network             = $vmDetails.Network
+						InstalledExtensions  = $vmDetails.InstalledExtensions
+						CpuAverage          = $vmCpuMetrics.AvgCpuPercent
+						CpuP95              = $vmCpuMetrics.P95CpuPercent
+						CpuP99              = $vmCpuMetrics.P99CpuPercent
+						CpuDailyBreakdown   = $vmCpuMetrics.CpuDailyBreakdown
+						CpuStatus           = $vmCpuMetrics.CpuStatus
+						AvgMemUsedPercent   = $vmMemMetrics.AvgMemUsedPercent
+						P95MemUsedPercent   = $vmMemMetrics.P95MemUsedPercent
+						P99MemUsedPercent   = $vmMemMetrics.P99MemUsedPercent
+						MemoryDailyBreakdown = $vmMemMetrics.MemoryDailyBreakdown
+						MemoryStatus        = $vmMemMetrics.MemoryStatus
+					}
+				}
+			}
+		}
+	}
+
 	# ── Storage Account FSLogix scan ─────────────────────────────────────────
 	# Stop the pool-phase spinner and reset counters — storage scan has its own checks
 	# and doesn't share the pool progress total.
@@ -5977,15 +6434,19 @@ try {
 			OutputDirectory       = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $null } else { $OutputDirectory }
 			ScanStorageAccounts   = if ($ScanStorageAccounts -and $ScanStorageAccounts.Count -gt 0) { $ScanStorageAccounts } else { $null }
 			SkipStorageAccounts   = $SkipStorageAccounts.IsPresent
+			ScanVMs               = $ScanVMs.IsPresent
+			ScanVMName            = if (@($ScanVMName).Count -gt 0) { $ScanVMName } else { $null }
 		}
 		SubscriptionCount       = @($subscriptions).Count
 		HostPoolCount           = $hostPools.Count
+		VmScanCount             = @($vmScanResults).Count
 		LicenseSummaryUserCount = $allAuthorizedUserIds.Count
 		LicenseSummaryStatus    = $licSummary.LicenseSummaryStatus
 		LicenseSummary          = $licSummary.LicenseSummary
 		UnlicensedUserCount     = $licSummary.UnlicensedUserCount
 		UnlicensedUsers         = $licSummary.UnlicensedUsers
 		HostPools               = $poolMetrics
+		Vms                     = $vmScanResults
 		StorageAccountScan      = $storageResults
 		ArmCallStats            = [PSCustomObject]@{
 			ReadCount                    = $script:armCounts.Read

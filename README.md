@@ -67,6 +67,11 @@ Enumerates all AVD host pools across one or more subscriptions.
 - Collects: SKU, replication, kind, encryption, public access, private endpoints, network rules, SMB multichannel, soft-delete, identity-based auth (directory service, default share permission, domain name)
 - Per-file-share: provisioned size, used size/%, IOPS, bandwidth, tier, Azure Backup status
 
+**VM Scan** *(`-ScanVMs`)*
+- Scans Azure VMs in the selected subscriptions and adds a VM detail section to the HTML report
+- Use `-ScanVMName` to restrict the scan to one or more named VMs
+- Collects: VM SKU, CPU core count, memory, hostname, operating system, join type, backup status, network details, installed extensions, CPU/memory metrics, ASR status, agent status/version, availability zone, and trusted launch status
+
 **Licence Assignments** *(Microsoft Graph)*
 - AVD-relevant SKUs per user (Windows 365, M365/O365 suites, Visio, Project, Power BI, Intune/EMS, Defender, AVD Store)
 - Users with role assignments but no qualifying licence
@@ -88,6 +93,8 @@ Both scripts also emit a self-contained HTML companion report next to the JSON e
 | `-SkipLicenceCheck` | switch | off | Skip Microsoft Graph licence collection |
 | `-ScanStorageAccounts` | string[] | *(none)* | Storage account names to scan instead of the default all-account search |
 | `-SkipStorageAccounts` | switch | off | Disable all storage account scanning |
+| `-ScanVMs` | switch | off | Scan Azure VMs and emit a VM detail section in the metrics report |
+| `-ScanVMName` | string[] | *(none)* | VM names to scan instead of the default all-VM search |
 | `-RunLocalDiscovery` | switch | off | Run `Invoke-AvdSessionHostAudit.ps1` on a live VM per pool via VM Run Command |
 | `-InlineLocalScript` | switch | off | Embed the audit script in the payload instead of downloading from GitHub (use when VMs block outbound access to `raw.githubusercontent.com`) |
 | `-LocalDiscoveryTimeout` | int | `300` | Seconds to wait for on-VM script (60-3600) |
@@ -128,6 +135,9 @@ Both scripts also emit a self-contained HTML companion report next to the JSON e
 
 # Scan storage accounts for FSLogix configuration
 .\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -ScanStorageAccounts storageaccount1,storageaccount2
+
+# Scan specific VMs
+.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -ScanVMs -ScanVMName vm01,vm02
 
 # Skip storage scanning entirely
 .\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -SkipStorageAccounts
