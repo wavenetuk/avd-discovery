@@ -1,0 +1,14 @@
+{
+  "ReportType": "AvdMetrics",
+  "CustomerAbbreviation": "contoso",
+  "CollectedAt": "2026-09-15T12:00:00",
+  "Collection": {
+    "SchemaVersion": "1.0",
+    "Workload": "Avd",
+    "ScannerMode": "Cloud",
+    "Status": "Completed",
+    "Capabilities": ["ManagementPlane", "UsageMetrics", "HtmlReport"],
+    "Warnings": [],
+    "Errors": []
+  }
+}

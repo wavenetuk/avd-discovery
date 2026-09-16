@@ -1,24 +1,42 @@
-# AVD Discovery Toolset
+# Discovery Toolset
 
-Two read-only PowerShell collectors plus a shared HTML report generator for assessing AVD environments.
-| Script | Runs on | Output |
+Run every scanner through the single root launcher, `Invoke-Discovery.ps1`. Workload implementation scripts, shared modules, and report assets are internal.
+| Workload | Runs on | Output |
 |---|---|---|
-| `scripts/Invoke-AvdMetricsCollection.ps1` | Local machine | `output/avd-metrics/<customer>-avd-metrics-<timestamp>.json` plus a sibling `.html` report rendered by the shared HTML generator |
-| `scripts/Invoke-AvdSessionHostAudit.ps1` | AVD session host | ZIP archive beside the script when run portably; the generated JSON, logs, and optional `.html` report are cleaned up after archiving, while the transcript is kept only when the run fails |
+| `Avd` (`Cloud`) | Local machine | `output/avd-metrics/<customer>-avd-metrics-<timestamp>.json` plus a sibling `.html` report |
+| `Avd` (`Host`) | AVD session host | Host audit JSON, optional HTML report, and portable archive when executed through VM Run Command |
+| `ADDS` (`Host`) | Windows host | `output/adds/<customer>-adds-host-<timestamp>.json` plus an optional HTML report |
+| `FilePrint` (`Host`) | Windows host | `output/file-print/<customer>-file-print-host-<timestamp>.json` plus an optional HTML report |
 
 ## Shared HTML Reporting
 
-`scripts/Invoke-HtmlReportGenerator.ps1` is the shared HTML report generator used by both collectors. It resolves the report type from the JSON payload or an explicit `-ReportType`, then dispatches to the matching renderer module under `scripts/reporting`.
+`scripts/reporting/Invoke-HtmlReportGenerator.ps1` is an internal shared HTML report generator. It resolves the report type from the JSON payload or an explicit `-ReportType`, then dispatches to the matching renderer module under `scripts/reporting`.
+
+New renderer modules should use the workload-neutral `Register-DiscoveryReportRenderer` and `Invoke-DiscoveryDefaultHtmlReportRenderer` extension points. The existing AVD-named equivalents remain available for compatibility with the current renderer packs.
 
 The renderer bundle is portable: if `scripts/reporting` is present beside the generator it uses those local files, and if the bundle is missing it downloads and caches the renderer assets from this repository's raw GitHub URLs before generating HTML. When run portably without `-OutputPath`, it writes the HTML into the same `scripts/<customer>-audit-results/` folder.
 
 The current renderer packs are `AvdMetrics` and `AzureSessionHostAudit`, each backed by a shared shell plus report-specific client script.
 
-`Invoke-AvdMetricsCollection.ps1` can attempt to run `Invoke-AvdSessionHostAudit.ps1` automatically on a live session host via Azure VM Run Command (`-RunLocalDiscovery`).
+## Shared Discovery Utilities
+
+`scripts/common/Discovery.Common.psm1` contains the workload-neutral collection primitives used by both collectors: Azure sign-in, ARM request execution and call tracking, command-policy validation, and optional JSON-to-HTML report generation. Workload-specific collectors retain their own discovery logic, command allowlists, output schemas, and console presentation.
+
+`scripts/common/Discovery.HostBaseline.psm1` is the shared Windows host discovery layer. It currently provides normalized machine identity details, Windows Time configuration/status, installed-application inventory, antivirus and Defender for Endpoint signals, language and locale state, printer inventory, and Universal Print signals. AVD-specific primary-application filtering remains a workload policy in the AVD host audit.
+
+When `Invoke-AvdMetricsCollection.ps1` runs the host audit through Azure VM Run Command, it now includes this module with the audit script in both download and `-InlineLocalScript` modes.
+
+`scripts/common/Discovery.Workloads.psm1` provides a registry for workload definitions under `scripts/workloads`. `Avd.Workload.ps1` maps the existing management-plane and host-audit entry scripts; `FilePrint.Workload.ps1` provides host-only file and print discovery; and `ADDS.Workload.ps1` provides host-only Active Directory dependency discovery. This establishes the extension point for SQL and RDS without changing their eventual collector interfaces.
+
+`Invoke-Discovery.ps1` is the single supported launcher. Use `-ListWorkloads` to inspect available scanners, then select a workload and `-CollectionMode Cloud` or `-CollectionMode Host`. Supply collector parameters through `-Parameters`, for example `-Parameters @{ CustomerAbbreviation = 'contoso'; NoHtml = $true }`. To run File & Print discovery: `./Invoke-Discovery.ps1 -Workload FilePrint -CollectionMode Host -Parameters @{ CustomerAbbreviation = 'contoso' }`. To run AD DS dependency discovery: `./Invoke-Discovery.ps1 -Workload ADDS -CollectionMode Host -Parameters @{ CustomerAbbreviation = 'contoso' }`.
+
+All new reports use a nested `Collection` metadata object. It contains `SchemaVersion`, `Workload`, `ScannerMode`, `Status`, `Capabilities`, `Warnings`, and `Errors`. The current AVD cloud and host reports now include this additive object while retaining their existing top-level fields and report types; the common validator accepts legacy reports without it during the transition.
+
+The AVD cloud workload can attempt to run its host audit automatically on a live session host via Azure VM Run Command (`-RunLocalDiscovery`).
 
 ---
 
-## Invoke-AvdMetricsCollection.ps1
+## AVD Cloud Workload
 
 Enumerates all AVD host pools across one or more subscriptions.
 
@@ -101,7 +119,21 @@ Both scripts also emit a self-contained HTML companion report next to the JSON e
 | `-RunAsUser` | switch | off | Run VM Run Command as a domain user instead of SYSTEM (enables per-user checks; see security note below) |
 | `-GitHubBranch` | string | `main` | Branch to download from when using `-RunLocalDiscovery` |
 | `-GeneratedBy` | string | *(none)* | Name of the person running the collection; stored in the output JSON |
+| `-UseCurrentContext` | switch | off | Reuse the active Azure PowerShell context instead of prompting to sign in |
 | `-ProjectCode` | string | *(none)* | Engagement or project code; stored in the output JSON |
+
+### RDS Connection Broker Topology
+
+The RDS workload can collect deployment topology from a Connection Broker when the
+`RemoteDesktop` PowerShell module is available. Supply the broker FQDN through the launcher:
+
+```powershell
+.\Invoke-Discovery.ps1 -Workload RDS -CollectionMode Host -Parameters @{ CustomerAbbreviation = 'contoso'; ConnectionBroker = 'rds-broker.contoso.local' }
+```
+
+The resulting report includes RDS servers and roles, session collections and hosts, RemoteApps,
+and licensing configuration. Without a broker FQDN, the scan records topology as skipped unless
+it is running on a server with the Connection Broker role.
 
 ### Prerequisites
 
@@ -116,36 +148,36 @@ Both scripts also emit a self-contained HTML companion report next to the JSON e
 
 ```powershell
 # All subscriptions, interactive prompts
-.\scripts\Invoke-AvdMetricsCollection.ps1
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Cloud
 
 # Specific subscription, 14-day window, weekdays only
-.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -SubscriptionId '00000000-...' -LookbackDays 14 -ExcludeWeekends
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Cloud -Parameters @{ CustomerAbbreviation = 'contoso'; SubscriptionId = '00000000-...'; LookbackDays = 14; ExcludeWeekends = $true }
 
 # Peak hours only (BST)
-.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -PeakHoursOnly -ExcludeWeekends -UtcOffsetHours 1
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Cloud -Parameters @{ CustomerAbbreviation = 'contoso'; PeakHoursOnly = $true; ExcludeWeekends = $true; UtcOffsetHours = 1 }
 
 # Run on-host audit automatically (downloads from GitHub)
-.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Cloud -Parameters @{ CustomerAbbreviation = 'contoso'; RunLocalDiscovery = $true }
 
 # Run on-host audit - inline (no outbound internet on VMs)
-.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -InlineLocalScript
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Cloud -Parameters @{ CustomerAbbreviation = 'contoso'; RunLocalDiscovery = $true; InlineLocalScript = $true }
 
 # Run on-host audit as a domain user (per-user checks)
-.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -RunLocalDiscovery -RunAsUser
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Cloud -Parameters @{ CustomerAbbreviation = 'contoso'; RunLocalDiscovery = $true; RunAsUser = $true }
 
 # Scan storage accounts for FSLogix configuration
-.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -ScanStorageAccounts storageaccount1,storageaccount2
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Cloud -Parameters @{ CustomerAbbreviation = 'contoso'; ScanStorageAccounts = @('storageaccount1', 'storageaccount2') }
 
 # Scan specific VMs
-.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -ScanVMs -ScanVMName vm01,vm02
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Cloud -Parameters @{ CustomerAbbreviation = 'contoso'; ScanVMs = $true; ScanVMName = @('vm01', 'vm02') }
 
 # Skip storage scanning entirely
-.\scripts\Invoke-AvdMetricsCollection.ps1 -CustomerAbbreviation contoso -SkipStorageAccounts
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Cloud -Parameters @{ CustomerAbbreviation = 'contoso'; SkipStorageAccounts = $true }
 ```
 
 ---
 
-## Invoke-AvdSessionHostAudit.ps1
+## AVD Host Workload
 
 Runs directly on an AVD session host (or via `-RunLocalDiscovery`).
 
@@ -221,26 +253,23 @@ Effective value, source (Group Policy / local WinStation / local RdServer / not 
 
 ```powershell
 # Basic - prompts for customer abbreviation
-.\scripts\Invoke-AvdSessionHostAudit.ps1
-
-# If the context-menu run closes too quickly, use the launcher wrapper instead
-scripts\Run-AvdSessionHostAudit.cmd
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Host
 
 # Primary applications only, custom output directory
-.\scripts\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation contoso -PrimaryApplicationsOnly -OutputDirectory C:\Temp
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Host -Parameters @{ CustomerAbbreviation = 'contoso'; PrimaryApplicationsOnly = $true; OutputDirectory = 'C:\Temp' }
 
 # Skip Group Policy report
-.\scripts\Invoke-AvdSessionHostAudit.ps1 -CustomerAbbreviation contoso -NoGpresult
+.\Invoke-Discovery.ps1 -Workload Avd -CollectionMode Host -Parameters @{ CustomerAbbreviation = 'contoso'; NoGpresult = $true }
 ```
 
 ---
 
 ## How `-RunLocalDiscovery` Works
 
-`Invoke-AvdMetricsCollection.ps1` iterates powered-on session hosts per pool and submits `Invoke-AvdSessionHostAudit.ps1` via Azure VM Run Command v2. It tries each host in turn until one succeeds.
+The AVD cloud workload iterates powered-on session hosts per pool and submits its host audit via Azure VM Run Command v2. It tries each host in turn until one succeeds.
 
 The bootstrap script on the VM:
-1. Downloads (or decodes from the inline payload) `Invoke-AvdSessionHostAudit.ps1` and `config/appExclusions.config.json`
+1. Downloads (or decodes from the inline payload) the AVD host audit and `config/appExclusions.config.json`
 2. Executes the audit in a temp directory
 3. GZip-compresses and base64-encodes the JSON output and writes it to a staging file
 4. Returns the staging file path; the caller reads it back in chunks, decodes it, and saves it to `output/vm-discovery/`
@@ -294,9 +323,11 @@ Each host pool must forward these log categories to a Log Analytics workspace:
 
 ```
 avd-discovery/
+├── Invoke-Discovery.ps1
 ├── scripts/
-│   ├── Invoke-AvdMetricsCollection.ps1
-│   └── Invoke-AvdSessionHostAudit.ps1
+│   ├── common/
+│   ├── reporting/
+│   └── workloads/
 ├── config/
 │   ├── appExclusions.config.json
 │   └── ms-service-plan-ids.csv

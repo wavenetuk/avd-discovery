@@ -81,7 +81,7 @@ function ConvertTo-SafePathSegment {
 	return $segment
 }
 
-function Register-AvdReportRenderer {
+function Register-DiscoveryReportRenderer {
 	param(
 		[Parameter(Mandatory = $true)]
 		[string]$ReportType,
@@ -98,6 +98,21 @@ function Register-AvdReportRenderer {
 		RenderScript = $RenderScript
 		ModuleName   = if ([string]::IsNullOrWhiteSpace($ModuleName)) { $ReportType } else { $ModuleName }
 	}
+}
+
+function Register-AvdReportRenderer {
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$ReportType,
+
+		[Parameter(Mandatory = $true)]
+		[scriptblock]$RenderScript,
+
+		[Parameter(Mandatory = $false)]
+		[string]$ModuleName
+	)
+
+	Register-DiscoveryReportRenderer -ReportType $ReportType -RenderScript $RenderScript -ModuleName $ModuleName
 }
 
 function Get-PortableRendererDirectory {
@@ -141,7 +156,7 @@ function Ensure-PortableRendererDirectory {
 
 function Resolve-ReportRendererDirectory {
 	$candidateDirectories = @(
-		(Join-Path -Path $PSScriptRoot -ChildPath 'reporting'),
+		$PSScriptRoot,
 		(Join-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -ChildPath 'scripts\reporting')
 	)
 
@@ -158,7 +173,7 @@ function Resolve-ReportRendererDirectory {
 
 function Test-LocalReportRendererLayoutAvailable {
 	$candidateDirectories = @(
-		(Join-Path -Path $PSScriptRoot -ChildPath 'reporting'),
+		$PSScriptRoot,
 		(Join-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -ChildPath 'scripts\reporting')
 	)
 
@@ -228,7 +243,7 @@ function Resolve-PortableOutputPath {
 function Import-AvdReportRendererModules {
 	$moduleDirectory = Resolve-ReportRendererDirectory
 
-	Get-ChildItem -Path $moduleDirectory -Filter '*.ps1' -File | Sort-Object -Property Name | ForEach-Object {
+	Get-ChildItem -Path $moduleDirectory -Filter '*.ps1' -File | Where-Object { $_.FullName -ne $PSCommandPath } | Sort-Object -Property Name | ForEach-Object {
 		. $_.FullName
 	}
 }

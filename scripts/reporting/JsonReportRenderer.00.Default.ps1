@@ -79,3 +79,33 @@ function script:Invoke-AvdDefaultHtmlReportRenderer {
 	Set-Content -Path $OutputPath -Value $htmlContent -Encoding UTF8
 	return $OutputPath
 }
+
+function script:Invoke-DiscoveryDefaultHtmlReportRenderer {
+	param(
+		[Parameter(Mandatory = $true)]
+		$Data,
+
+		[Parameter(Mandatory = $true)]
+		[string]$OutputPath,
+
+		[Parameter(Mandatory = $true)]
+		[string]$ResolvedTitle,
+
+		[Parameter(Mandatory = $true)]
+		[string]$ClientScriptPath,
+
+		[Parameter(Mandatory = $false)]
+		[string]$SourceJsonFileName,
+
+		[Parameter(Mandatory = $false)]
+		[string]$AdditionalCss
+	)
+
+	Invoke-AvdDefaultHtmlReportRenderer `
+		-Data $Data `
+		-OutputPath $OutputPath `
+		-ResolvedTitle $ResolvedTitle `
+		-ClientScriptPath $ClientScriptPath `
+		-SourceJsonFileName $SourceJsonFileName `
+		-AdditionalCss $AdditionalCss
+}

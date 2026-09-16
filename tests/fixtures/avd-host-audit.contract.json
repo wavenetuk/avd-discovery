@@ -1,0 +1,14 @@
+{
+  "ReportType": "AzureSessionHostAudit",
+  "CustomerAbbreviation": "contoso",
+  "CollectedAt": "2026-09-15T12:00:00",
+  "Collection": {
+    "SchemaVersion": "1.0",
+    "Workload": "Avd",
+    "ScannerMode": "Host",
+    "Status": "Completed",
+    "Capabilities": ["HostDiscovery", "HtmlReport"],
+    "Warnings": [],
+    "Errors": []
+  }
+}

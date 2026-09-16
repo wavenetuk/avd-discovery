@@ -90,19 +90,19 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$commonModulePath = Join-Path -Path $PSScriptRoot -ChildPath 'common\Discovery.Common.psm1'
+$commonModulePath = @((Join-Path $PSScriptRoot 'common\Discovery.Common.psm1'), (Join-Path $PSScriptRoot '..\..\common\Discovery.Common.psm1')) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not (Test-Path -Path $commonModulePath)) {
 	throw "Shared discovery module not found: $commonModulePath"
 }
 Import-Module -Name $commonModulePath -Force -ErrorAction Stop
 
-$hostBaselineModulePath = Join-Path -Path $PSScriptRoot -ChildPath 'common\Discovery.HostBaseline.psm1'
+$hostBaselineModulePath = @((Join-Path $PSScriptRoot 'common\Discovery.HostBaseline.psm1'), (Join-Path $PSScriptRoot '..\..\common\Discovery.HostBaseline.psm1')) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not (Test-Path -Path $hostBaselineModulePath)) {
 	throw "Shared host baseline module not found: $hostBaselineModulePath"
 }
 Import-Module -Name $hostBaselineModulePath -Force -ErrorAction Stop
 
-$adDsModulePath = Join-Path -Path $PSScriptRoot -ChildPath 'common\Discovery.ADDS.psm1'
+$adDsModulePath = @((Join-Path $PSScriptRoot 'common\Discovery.ADDS.psm1'), (Join-Path $PSScriptRoot '..\..\common\Discovery.ADDS.psm1')) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not (Test-Path -Path $adDsModulePath)) {
 	throw "Shared Active Directory discovery module not found: $adDsModulePath"
 }
@@ -1791,275 +1791,6 @@ function Get-TeamsMediaOptimizationDiscovery {
 	}
 }
 
-function Get-ConfigFileServerReferences {
-	<#
-	.SYNOPSIS
-	Scans application config files under Program Files for references to remote servers
-	or domain-joined machines - UNC paths, FQDNs, and connection-string server keywords.
-	Only text-based config file types up to 1 MB are inspected. Windows system directories
-	and common redistributable/framework folders are excluded to reduce noise.
-	#>
-
-	$scanRoots = @(
-		$env:ProgramFiles,
-		${env:ProgramFiles(x86)}
-	) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path $_) } | Sort-Object -Unique
-
-	# File extensions to scan (text-based config formats only)
-	$configExtensions = @('.ini', '.cfg', '.config', '.xml', '.conf', '.properties', '.env', '.yaml', '.yml')
-
-	# Folder name fragments to skip - Windows components, runtimes, redistributables
-	$excludedFolderPatterns = @(
-		'Windows NT', 'Windows Kits', 'Windows Mail', 'Windows Media',
-		'Microsoft.NET', 'dotnet', 'Microsoft Visual C++', 'Microsoft Visual Studio',
-		'WindowsPowerShell', 'Windows Defender', 'Windows Security',
-		'Microsoft\EdgeUpdate', 'Microsoft\Edge\Application',
-		'Common Files\microsoft shared', 'Common Files\System',
-		'Common Files\Services'
-	)
-
-	# Regex patterns that indicate a server/domain reference in a config value
-	# 1. UNC path:            \\server  or  \\server.domain.com
-	# 2. FQDN assignment:     keyword=server.domain.tld  (must have at least one dot-separated label before a 2+ char TLD)
-	# 3. Connection strings:  Server=x, Data Source=x, Host=x, hostname=x, address=x, DataSource=x
-	$uncPattern        = [regex]'(?i)\\\\[A-Za-z0-9_-][A-Za-z0-9_.-]+'
-	$fqdnValuePattern  = [regex]'(?i)(?:server|host|hostname|address|data[\s_-]*source|datasource|endpoint|url|uri|broker|gateway|proxy)\s*[=:]\s*([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){1,}\.[A-Za-z]{2,})'
-	$maxFileSizeBytes  = 1MB
-
-	$findings = @()
-
-	foreach ($root in $scanRoots) {
-		try {
-			$files = @(Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
-				Where-Object {
-					$configExtensions -contains $_.Extension.ToLowerInvariant() -and
-					$_.Length -le $maxFileSizeBytes -and
-					-not ($excludedFolderPatterns | Where-Object { $_.FullName -like "*$_*" })
-				})
-		}
-		catch { continue }
-
-		foreach ($file in $files) {
-			try {
-				$content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
-			}
-			catch { continue }
-
-			$matchedRefs = @()
-
-			# UNC paths
-			foreach ($m in $uncPattern.Matches($content)) {
-				$val = $m.Value.TrimEnd('/', '\', ' ', '"', "'")
-				# Skip loopback and well-known non-domain tokens
-				if ($val -notmatch '\\\\(localhost|127\.|::1)') {
-					$matchedRefs += [PSCustomObject]@{ Type = 'UncPath'; Value = $val }
-				}
-			}
-
-			# FQDN / connection-string references
-			foreach ($m in $fqdnValuePattern.Matches($content)) {
-				$fqdn = $m.Groups[1].Value.Trim('"', "'", ' ', ';', ',')
-				# Skip localhost variants, pure IP addresses, and .local mDNS names that may be non-AD
-				if ($fqdn -notmatch '^(localhost|127\.|0\.0\.0\.0|::1)' -and
-				    $fqdn -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
-					$matchedRefs += [PSCustomObject]@{ Type = 'FqdnReference'; Value = $fqdn }
-				}
-			}
-
-			if ($matchedRefs.Count -gt 0) {
-				# Deduplicate references within this file
-				$dedupedRefs = $matchedRefs | Group-Object -Property Type, Value | ForEach-Object {
-					$_.Group[0]
-				}
-				$findings += [PSCustomObject]@{
-					FilePath   = $file.FullName
-					FileName   = $file.Name
-					SizeBytes  = $file.Length
-					References = @($dedupedRefs)
-				}
-			}
-		}
-	}
-
-	return @($findings)
-}
-
-function Get-ActiveDirectoryDependencyDiscovery {
-	<#
-	.SYNOPSIS
-	Checks whether the host has dependencies on Active Directory that would block or
-	complicate a move to Entra-only (Azure AD) join. Examines services running as domain
-	accounts, scheduled tasks running as domain accounts, ODBC data sources pointing at
-	domain servers or using domain credentials, active TCP connections to common AD
-	ports (88, 135, 389, 445, 464, 636, 3268, 3269), and application config files under
-	Program Files that reference remote servers or domain-joined machines by name.
-
-	TCP connections are deduplicated by remote address + port so that hundreds of SMB
-	sessions to the same file server appear as a single entry with a connection count.
-	#>
-
-	# --- Domain-account services ---
-	$domainServices = @()
-	try {
-		$domainServices = @(Get-CimInstance -ClassName Win32_Service `
-			-Property Name,DisplayName,StartName,State,StartMode `
-			-ErrorAction Stop |
-			Where-Object {
-				$acct = $_.StartName
-				-not [string]::IsNullOrEmpty($acct) -and
-				$acct -match '\\' -and
-				$acct -notmatch '^(LocalSystem$|NT AUTHORITY\\|NT SERVICE\\|LOCAL SERVICE$|NETWORK SERVICE$)'
-			} | ForEach-Object {
-				[PSCustomObject]@{
-					Name        = $_.Name
-					DisplayName = Get-NormalizedText -Value $_.DisplayName
-					Account     = $_.StartName
-					State       = [string]$_.State
-					StartMode   = [string]$_.StartMode
-				}
-			})
-	}
-	catch { }
-
-	# --- Domain-account scheduled tasks ---
-	$domainTasks = @()
-	try {
-		$domainTasks = @(Get-ScheduledTask -ErrorAction Stop | ForEach-Object {
-			$principal = $_.Principal
-			if ($null -eq $principal) { return }
-			$userId = $null
-			try { $userId = [string]$principal.UserId } catch { return }
-			if ([string]::IsNullOrEmpty($userId)) { return }
-			if ($userId -notmatch '\\') { return }
-			if ($userId -match '^(SYSTEM$|S-1-5-18$|LOCAL SERVICE$|NETWORK SERVICE$|BUILTIN\\|NT AUTHORITY\\|NT SERVICE\\|S-1-5-)') { return }
-			$runLevel  = $null; try { $runLevel  = [string]$principal.RunLevel } catch { }
-			$taskState = $null; try { $taskState = [string]$_.State        } catch { }
-			[PSCustomObject]@{
-				TaskPath = [string]$_.TaskPath
-				TaskName = [string]$_.TaskName
-				Account  = $userId
-				RunLevel = $runLevel
-				State    = $taskState
-			}
-		})
-	}
-	catch { }
-
-	# --- ODBC data sources (system DSNs - 32-bit and 64-bit) ---
-	$odbcSources = @()
-	try {
-		$odbcPaths = @(
-			'HKLM:\SOFTWARE\ODBC\ODBC.INI',
-			'HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBC.INI'
-		)
-		$domainPattern = '\\\\[A-Za-z0-9_.-]+\.[A-Za-z]{2,}|\\\\[A-Za-z0-9_-]+'
-
-		foreach ($odbcRoot in $odbcPaths) {
-			if (-not (Test-Path $odbcRoot)) { continue }
-			$dsnNames = @(Get-ChildItem -Path $odbcRoot -ErrorAction SilentlyContinue |
-				Where-Object { $_.PSChildName -ne 'ODBC Data Sources' } |
-				Select-Object -ExpandProperty PSChildName)
-			foreach ($dsn in $dsnNames) {
-				$vals = Get-RegistryKeyValues -Path "$odbcRoot\$dsn"
-				if ($null -eq $vals) { continue }
-				$server = $vals.Server
-				$uid    = $vals.UID
-				$dbq    = $vals.DBQ
-				$driver = $vals.Driver
-
-				$serverFlag = (-not [string]::IsNullOrWhiteSpace($server) -and (
-					$server -match '\.' -or $server -match '^\\\\'))
-				$credFlag   = (-not [string]::IsNullOrWhiteSpace($uid) -and $uid -match '\\')
-				$dbqFlag    = (-not [string]::IsNullOrWhiteSpace($dbq) -and $dbq -match $domainPattern)
-
-				if ($serverFlag -or $credFlag -or $dbqFlag) {
-					$odbcSources += [PSCustomObject]@{
-						DsnName      = $dsn
-						RegistryPath = "$odbcRoot\$dsn"
-						Driver       = Get-NormalizedText -Value $driver
-						Server       = Get-NormalizedText -Value $server
-						Uid          = Get-NormalizedText -Value $uid
-						Dbq          = Get-NormalizedText -Value $dbq
-						FlagReasons  = @(
-							if ($serverFlag) { 'DomainServer' }
-							if ($credFlag)   { 'DomainCredential' }
-							if ($dbqFlag)    { 'DomainPath' }
-						)
-					}
-				}
-			}
-		}
-	}
-	catch { }
-
-	# --- Active TCP connections to common AD ports ---
-	# 88=Kerberos, 135=RPC/EPM, 389=LDAP, 445=SMB, 464=Kpasswd,
-	# 636=LDAPS, 3268=GC-LDAP, 3269=GC-LDAPS
-	#
-	# Connections are grouped by {RemoteAddress, RemotePort} - an AVD host can have
-	# thousands of active SMB sessions to the same file server, so emitting each
-	# individual connection would produce a huge payload.
-	$adPorts = @(88, 135, 389, 445, 464, 636, 3268, 3269)
-	$adPortMap = @{
-		88   = 'Kerberos'
-		135  = 'RPC/Endpoint Mapper'
-		389  = 'LDAP'
-		445  = 'SMB'
-		464  = 'Kerberos Password Change'
-		636  = 'LDAPS'
-		3268 = 'Global Catalog LDAP'
-		3269 = 'Global Catalog LDAPS'
-	}
-	$adConnections = @()
-	try {
-		$localIPs = @('127.0.0.1', '::1')
-		try {
-			$localIPs += @([System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
-				ForEach-Object { $_.ToString() })
-		}
-		catch { }
-
-		$adConnections = @(
-			Get-NetTCPConnection -State Established -ErrorAction Stop |
-			Where-Object { $_.RemotePort -in $adPorts -and $_.RemoteAddress -notin $localIPs } |
-			Group-Object -Property RemoteAddress, RemotePort |
-			ForEach-Object {
-				$sample = $_.Group[0]
-				[PSCustomObject]@{
-					RemoteAddress   = $sample.RemoteAddress
-					RemotePort      = $sample.RemotePort
-					Service         = $adPortMap[$sample.RemotePort]
-					ConnectionCount = $_.Count
-				}
-			}
-		)
-	}
-	catch { }
-
-	# --- Config file server references ---
-	$configFileRefs = Get-ConfigFileServerReferences
-
-	$hasDependencies = @($domainServices).Count -gt 0 -or
-	                   @($domainTasks).Count -gt 0 -or
-	                   @($odbcSources).Count -gt 0 -or
-	                   @($adConnections).Count -gt 0 -or
-	                   @($configFileRefs).Count -gt 0
-
-	[PSCustomObject]@{
-		HasDomainDependencies        = $hasDependencies
-		DomainServiceCount           = @($domainServices).Count
-		DomainScheduledTaskCount     = @($domainTasks).Count
-		DomainOdbcSourceCount        = @($odbcSources).Count
-		AdPortConnectionCount        = @($adConnections).Count
-		ConfigFileReferenceCount     = @($configFileRefs).Count
-		DomainServices               = @($domainServices)
-		DomainScheduledTasks         = @($domainTasks)
-		OdbcSources                  = @($odbcSources)
-		AdPortConnections            = @($adConnections)
-		ConfigFileServerReferences   = @($configFileRefs)
-	}
-}
-
 function Get-GroupPolicyDiscovery {
 	param(
 		[Parameter(Mandatory = $true)]
@@ -2511,10 +2242,10 @@ function ConvertTo-SafePathSegment {
 }
 
 function Test-RepoLayoutAvailable {
-	$repoRoot = Split-Path -Path $PSScriptRoot -Parent
+	$repoRoot = Split-Path -Path (Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent) -Parent
 	$requiredPaths = @(
 		(Join-Path $repoRoot 'config\appExclusions.config.json'),
-		(Join-Path $repoRoot 'scripts\Invoke-HtmlReportGenerator.ps1')
+		(Join-Path $repoRoot 'scripts\reporting\Invoke-HtmlReportGenerator.ps1')
 	)
 
 	foreach ($path in $requiredPaths) {
@@ -2540,7 +2271,7 @@ function Resolve-AuditOutputDirectory {
 	}
 
 	if (Test-RepoLayoutAvailable) {
-		return (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'output\vm-discovery')
+		return (Join-Path (Split-Path -Path (Split-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -Parent) -Parent) 'output\vm-discovery')
 	}
 
 	return $PSScriptRoot
@@ -2943,7 +2674,7 @@ function Start-SpinnerRunspace {
 			$barStr = ''
 			if ($pct -ge 0) {
 				$w = 20; $f = [Math]::Min([int]($pct / 100.0 * $w), $w)
-				$barStr = "  ${dim}[${reset}${purple}$(('#' * $f))${dim}$(('.' * ($w - $f)))]${reset}  $pct%"
+				$barStr = "  $dim[$reset$purple$('█' * $f)$dim$('░' * ($w - $f))]$reset  $pct%"
 			}
 			$line    = "$purple$bold $s  $act$reset  $dim$sts$reset$barStr"
 			if ($_st.Lock.Wait(50)) {
